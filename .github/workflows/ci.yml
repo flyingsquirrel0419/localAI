@@ -93,5 +93,15 @@ jobs:
             exit 1
           fi
 
+      # JavaScriptRuntime/NodeHostRuntime/AgentAcceptance tests spawn
+      # /usr/bin/node and /usr/bin/npm by absolute path; macos-15 ships Node
+      # only via Homebrew, so install it and symlink into /usr/bin.
+      - name: Install Node.js for macOS tests
+        run: |
+          brew install node
+          sudo ln -sf "$(which node)" /usr/bin/node
+          sudo ln -sf "$(which npm)" /usr/bin/npm
+          /usr/bin/node --version
+
       - name: Run LocalAICore tests on macOS
         run: swift test -j 2
