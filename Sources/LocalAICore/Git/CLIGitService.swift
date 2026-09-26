@@ -86,14 +86,17 @@ public final class CLIGitService: GitService, @unchecked Sendable {
 
     private static func classifyFailure(stderr: String, hint: String?) -> GitError {
         let lower = stderr.lowercased()
+        // Non-fast-forward rejection is checked first: git's rejection text can
+        // contain auth-adjacent phrases on some platform gits (e.g. credential
+        // helper chatter on macOS), and rejection never means auth failure.
+        if lower.contains("non-fast-forward") || lower.contains("fetch first")
+            || lower.contains("updates were rejected") || lower.contains("rejected") {
+            return .nonFastForward
+        }
         if lower.contains("authentication failed") || lower.contains("authentication required")
             || lower.contains("403") || lower.contains("401")
             || lower.contains("could not read username") || lower.contains("permission denied") {
             return .authenticationFailed
-        }
-        if lower.contains("non-fast-forward") || lower.contains("fetch first")
-            || lower.contains("updates were rejected") || lower.contains("rejected") {
-            return .nonFastForward
         }
         if lower.contains("could not resolve host") || lower.contains("connection refused")
             || lower.contains("network is unreachable") || lower.contains("operation timed out")
