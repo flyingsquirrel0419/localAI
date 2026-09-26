@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -j 2
+      - name: Test
+        run: swift test -j 2
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: |
+          cd App
+          xcodegen generate
+      - name: Build iOS app
+        run: |
+          xcodebuild \
+            -project App/LocalAI.xcodeproj \
+            -scheme LocalAI \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            build CODE_SIGNING_ALLOWED=NO
+      - name: Run LocalAICore tests on macOS
+        run: swift test -j 2

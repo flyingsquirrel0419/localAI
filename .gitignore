@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+.env
+.env.*
+!.env.example
+App/Generated/
