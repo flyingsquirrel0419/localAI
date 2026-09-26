@@ -263,7 +263,11 @@ final class LineSocket: @unchecked Sendable {
     static func open(host: String, port: Int) throws -> LineSocket {
         var hints = addrinfo()
         hints.ai_family = AF_INET
+        #if canImport(Glibc)
         hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #else
+        hints.ai_socktype = SOCK_STREAM
+        #endif
         var result: UnsafeMutablePointer<addrinfo>?
         let status = getaddrinfo(host, String(port), &hints, &result)
         guard status == 0, let info = result else {
@@ -274,6 +278,11 @@ final class LineSocket: @unchecked Sendable {
         guard descriptor >= 0 else {
             throw NodeHostRuntimeError.hostError("socket() failed: errno \(errno)")
         }
+        #if canImport(Darwin)
+        // Darwin has no MSG_NOSIGNAL; suppress SIGPIPE on this socket instead.
+        var one: Int32 = 1
+        setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        #endif
         if posixConnect(descriptor, info.pointee.ai_addr, info.pointee.ai_addrlen) != 0 {
             let e = errno
             posixClose(descriptor)
@@ -294,7 +303,12 @@ final class LineSocket: @unchecked Sendable {
         try bytes.withUnsafeBytes { ptr in
             var written = 0
             while written < bytes.count {
-                let n = send(descriptor, ptr.baseAddress!.advanced(by: written), bytes.count - written, 0)
+                #if canImport(Glibc)
+                let flags = MSG_NOSIGNAL
+                #else
+                let flags: Int32 = 0 // SO_NOSIGPIPE set at open() time on Darwin
+                #endif
+                let n = send(descriptor, ptr.baseAddress!.advanced(by: written), bytes.count - written, flags)
                 if n < 0 {
                     if errno == EINTR { continue }
                     markClosed()
