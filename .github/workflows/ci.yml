@@ -11,6 +11,12 @@ jobs:
     container: swift:6.1
     steps:
       - uses: actions/checkout@v4
+      # JavaScriptRuntimeTests (merged from main) spawn real node/npm processes;
+      # the bare swift:6.1 container doesn't ship Node.js.
+      - name: Install Node.js
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq nodejs npm
       - name: Build
         run: swift build -j 2
       - name: Test
@@ -25,14 +31,22 @@ jobs:
         run: |
           set -e
           ls /Applications | grep -i xcode || true
-          if [ -d /Applications/Xcode_16.4.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.4.app
-          elif [ -d /Applications/Xcode_16.3.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.3.app
-          elif [ -d /Applications/Xcode_16.2.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.2.app
-          else
-            sudo xcode-select -s /Applications/Xcode.app
+          # libgit2.swift (Git2 product) requires swift-tools 6.2 → Xcode 26.
+          # Prefer the newest available Xcode 26, then fall back to 16.x.
+          for app in /Applications/Xcode_26.4.app /Applications/Xcode_26.3.app \
+                     /Applications/Xcode_26.2.app /Applications/Xcode_26.1.app \
+                     /Applications/Xcode_26.app; do
+            if [ -d "$app" ]; then
+              sudo xcode-select -s "$app"
+              break
+            fi
+          done
+          if ! xcodebuild -version 2>/dev/null | grep -q "Xcode 26"; then
+            if [ -d /Applications/Xcode_16.4.app ]; then
+              sudo xcode-select -s /Applications/Xcode_16.4.app
+            else
+              sudo xcode-select -s /Applications/Xcode.app
+            fi
           fi
           xcodebuild -version
           swift --version
