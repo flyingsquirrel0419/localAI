@@ -58,7 +58,43 @@ function buildRegistry(base) {
     { name: 'package/index.js', data: 'module.exports = 42;\n' },
     { name: 'package/cli.js', data: 'console.log("mini cli ok");\n' },
   ]);
-  const tarballs = { 'dep-b': depB, 'dep-a': depA, mini };
+  // Conflict set: A depends on C@1, B depends on C@2, root depends on C@2.
+  const depC1 = makeTgz([
+    { name: 'package/package.json', data: JSON.stringify({ name: 'dep-c', version: '1.0.0', main: 'index.js' }) },
+    { name: 'package/index.js', data: 'module.exports = "c1";\n' },
+  ]);
+  const depC2 = makeTgz([
+    { name: 'package/package.json', data: JSON.stringify({ name: 'dep-c', version: '2.0.0', main: 'index.js' }) },
+    { name: 'package/index.js', data: 'module.exports = "c2";\n' },
+  ]);
+  const conA = makeTgz([
+    { name: 'package/package.json', data: JSON.stringify({ name: 'con-a', version: '1.0.0', main: 'index.js', dependencies: { 'dep-c': '^1.0.0' } }) },
+    { name: 'package/index.js', data: 'module.exports = require("dep-c");\n' },
+  ]);
+  const conB = makeTgz([
+    { name: 'package/package.json', data: JSON.stringify({ name: 'con-b', version: '1.0.0', main: 'index.js', dependencies: { 'dep-c': '^2.0.0' } }) },
+    { name: 'package/index.js', data: 'module.exports = require("dep-c");\n' },
+  ]);
+  const tarballs = {
+    'dep-b': depB, 'dep-a': depA, mini,
+    'dep-c@1.0.0': depC1, 'dep-c@2.0.0': depC2,
+    'con-a': conA, 'con-b': conB,
+  };
+  const multiMeta = (name, versions) => ({
+    name,
+    'dist-tags': { latest: versions[versions.length - 1].version },
+    versions: Object.fromEntries(versions.map((v) => {
+      const key = versions.length > 1 ? `${name}@${v.version}` : name;
+      return [v.version, {
+        name, version: v.version,
+        dependencies: v.dependencies,
+        dist: {
+          tarball: `${base}/${key}/-/${name}-${v.version}.tgz`,
+          integrity: 'sha512-' + crypto.createHash('sha512').update(tarballs[key]).digest('base64'),
+        },
+      }];
+    })),
+  });
   const meta = (name, version, deps) => ({
     name,
     'dist-tags': { latest: version },
@@ -77,6 +113,9 @@ function buildRegistry(base) {
     'dep-a': meta('dep-a', '2.0.0', { 'dep-b': '^1.0.0' }),
     'dep-b': meta('dep-b', '1.0.0', undefined),
     mini: meta('mini', '1.0.0', undefined),
+    'dep-c': multiMeta('dep-c', [{ version: '1.0.0' }, { version: '2.0.0' }]),
+    'con-a': multiMeta('con-a', [{ version: '1.0.0', dependencies: { 'dep-c': '^1.0.0' } }]),
+    'con-b': multiMeta('con-b', [{ version: '1.0.0', dependencies: { 'dep-c': '^2.0.0' } }]),
   };
   return { docs, tarballs };
 }
@@ -143,6 +182,36 @@ test('install from fake registry: transitive deps, .bin shim, lockfile', async (
   const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
   assert.strictEqual(lock.lockfileVersion, 3);
   assert.strictEqual(lock.packages['node_modules/dep-a'].version, '2.0.0');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('version conflict nests per-dependent (npm-style)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodehost-conflict-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: 'app-conflict', version: '1.0.0',
+    dependencies: { 'con-a': '^1.0.0', 'con-b': '^1.0.0', 'dep-c': '^2.0.0' },
+  }, null, 2));
+  let stderr = '';
+  const code = await installer.install({
+    cwd: dir, packages: [], onStdout: () => {}, onStderr: (d) => { stderr += d; },
+  });
+  assert.strictEqual(code, 0, stderr);
+
+  // Root gets C@2 (highest, and what the root asked for).
+  const rootC = require(path.join(dir, 'node_modules', 'dep-c'));
+  assert.strictEqual(rootC, 'c2');
+  // con-a declared C@^1 — it must get 1.0.0 from its own node_modules.
+  const aSees = require(path.join(dir, 'node_modules', 'con-a'));
+  assert.strictEqual(aSees, 'c1', 'con-a must resolve dep-c@1 via nested node_modules');
+  // con-b declared C@^2 — satisfied by the root copy.
+  const bSees = require(path.join(dir, 'node_modules', 'con-b'));
+  assert.strictEqual(bSees, 'c2');
+  // The nested copy physically exists at the npm-style location.
+  const nestedPkg = JSON.parse(fs.readFileSync(
+    path.join(dir, 'node_modules', 'con-a', 'node_modules', 'dep-c', 'package.json'), 'utf8'));
+  assert.strictEqual(nestedPkg.version, '1.0.0');
+  // No legacy synthetic nest dir.
+  assert.ok(!fs.existsSync(path.join(dir, 'node_modules', '.nodehost-nested')));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

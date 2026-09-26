@@ -76,85 +76,118 @@ function lockPinned(lock, name) {
 }
 
 /**
- * Resolve the dependency graph. Returns a flat-ish plan:
- *   Map<name, Map<version, {name, version, tarball, integrity, deps, bin, native}>>
- * and placement: Map<name, version> for the root node_modules plus a list of
- * nested placements [{parentName, name, version}].
+ * Resolve the dependency graph as a tree of edges.
+ * Returns { rootEdges, nodeInfo } where rootEdges is a Map<name, {version, deps}>
+ * and each deps entry is the same shape recursively:
+ *   deps: Map<name, {version, deps}>
+ * nodeInfo: `${name}@${version}` -> registry manifest for that version.
  */
 async function resolveGraph(rootDeps, lock, shouldCancel, onStderr) {
   const manifests = new Map(); // name -> packument
-  const cacheKey = (n) => n;
   async function getPackument(name) {
-    const k = cacheKey(name);
-    if (!manifests.has(k)) {
+    if (!manifests.has(name)) {
       if (shouldCancel()) throw new Error('cancelled');
-      manifests.set(k, await fetchJson(packumentUrl(name)));
+      manifests.set(name, await fetchJson(packumentUrl(name)));
     }
-    return manifests.get(k);
+    return manifests.get(name);
   }
 
-  // resolution results: name -> Map<rangeKey, version>
-  const chosen = new Map(); // name -> Set<version>
   const nodeInfo = new Map(); // `${name}@${version}` -> manifest version obj
-  const queue = [];
 
-  function pick(name, range) {
-    return getPackument(name).then((pk) => {
-      const versions = Object.keys(pk.versions || {});
-      const v = semver.maxSatisfying(versions, range, pk['dist-tags']);
-      if (!v) throw new Error(`No matching version for ${name}@${range}`);
-      return { version: v, meta: pk.versions[v] };
-    });
+  async function pick(name, range) {
+    const pk = await getPackument(name);
+    const versions = Object.keys(pk.versions || {});
+    const v = semver.maxSatisfying(versions, range, pk['dist-tags']);
+    if (!v) throw new Error(`No matching version for ${name}@${range}`);
+    return v;
   }
 
-  async function addDep(name, range, pinnedVersion) {
-    let version = pinnedVersion;
-    if (!version) {
-      const r = await pick(name, range);
-      version = r.version;
-    }
+  // Resolve one (name, range) into a node {version, deps}, memoized by exact
+  // resolved key so shared subgraphs resolve once but every edge keeps its own
+  // placement identity.
+  const resolved = new Map(); // `${name}@${range}` -> node
+  async function resolveNode(name, range, pinnedVersion) {
+    const memoKey = `${name}@${pinnedVersion || range}`;
+    if (resolved.has(memoKey)) return resolved.get(memoKey);
+    const version = pinnedVersion || (await pick(name, range));
     const key = `${name}@${version}`;
-    if (nodeInfo.has(key)) return version;
     const pk = await getPackument(name);
     const meta = pk.versions[version];
     if (!meta) throw new Error(`Registry metadata missing ${key}`);
     nodeInfo.set(key, meta);
-    if (!chosen.has(name)) chosen.set(name, new Set());
-    chosen.get(name).add(version);
-    queue.push(meta);
-    return version;
-  }
-
-  // Root deps (pinned to lockfile version when present).
-  for (const [name, range] of Object.entries(rootDeps)) {
-    const pinned = lock && lockPinned(lock, name);
-    await addDep(name, range, pinned && pinned.version);
-  }
-  while (queue.length) {
+    const node = { version, deps: new Map() };
+    resolved.set(memoKey, node);
     if (shouldCancel()) throw new Error('cancelled');
-    const meta = queue.shift();
     const deps = Object.assign({}, meta.dependencies);
     for (const [dname, drange] of Object.entries(deps)) {
       const pinned = lock && lockPinned(lock, dname);
-      await addDep(dname, drange, pinned && pinned.version);
+      node.deps.set(dname, await resolveNode(dname, drange, pinned && pinned.version));
     }
+    return node;
   }
-  return { chosen, nodeInfo };
+
+  const rootEdges = new Map();
+  for (const [name, range] of Object.entries(rootDeps)) {
+    const pinned = lock && lockPinned(lock, name);
+    rootEdges.set(name, await resolveNode(name, range, pinned && pinned.version));
+  }
+  return { rootEdges, nodeInfo };
 }
 
-/** Compute placement: root hoisting with nesting on conflict. */
-function planLayout(chosen, nodeInfo) {
-  const root = new Map(); // name -> version (first-seen wins, npm-like enough)
-  const nested = [];      // {parentKey, name, version}
-  for (const [name, versions] of chosen) {
-    const list = [...versions].sort((a, b) => {
-      const pa = semver.parseVersion(a), pb = semver.parseVersion(b);
-      return pa && pb ? semver.compareVersions(pa, pb) : 0;
-    });
-    // Highest version at root.
-    root.set(name, list[list.length - 1]);
-    for (let i = 0; i < list.length - 1; i++) {
-      nested.push({ name, version: list[i] });
+/**
+ * Compute placement the way npm does: walk each dependency's subtree and give
+ * every node the highest version that satisfies ITS OWN range, hoisted to the
+ * root node_modules when that copy also satisfies the dependent; otherwise
+ * nested at node_modules/<dependent>/node_modules/<name>.
+ *
+ * Because resolveGraph already resolved every edge to the version satisfying
+ * that edge's range, placement is just: root edges go to the root; a child
+ * goes to the root too when its version equals the root's version for that
+ * name (or the name is absent at root, meaning only this subtree needs it —
+ * then hoist it as the root copy); otherwise it nests under the dependent.
+ *
+ * Returns { root: Map<name, version>, nested: [{dependent, name, version}] }.
+ * `dependent` is a path segment list under node_modules, e.g. ['dep-a'] or
+ * ['dep-a', 'dep-c'] for deeper nesting.
+ */
+function planLayout(rootEdges, nodeInfo) {
+  const root = new Map();
+  const nested = [];        // {chain: [...], name, version} — chain is the
+                            // package's own path segments under node_modules,
+                            // e.g. ['dep-a', 'dep-c'] -> node_modules/dep-a/node_modules/dep-c
+  const visited = new Set(); // `${chain}|${name}@${version}` — shared subtrees
+                             // (memoized resolution) are placed once per chain.
+
+  // Root edges define the root copies.
+  for (const [name, node] of rootEdges) root.set(name, node.version);
+
+  function placeTree(deps, dependentChain) {
+    for (const [name, node] of deps) {
+      const rootVersion = root.get(name);
+      let chain;
+      if (rootVersion === undefined) {
+        // Not present at root: hoist this version as the root copy.
+        root.set(name, node.version);
+        chain = [name];
+      } else if (rootVersion === node.version) {
+        // Satisfied by the root copy; resolves from there.
+        chain = [name];
+      } else {
+        // Conflict: nest under the dependent, npm-style.
+        chain = dependentChain.concat([name]);
+        nested.push({ chain, name, version: node.version });
+      }
+      const visitKey = `${chain.join('/')}|${name}@${node.version}`;
+      if (visited.has(visitKey)) continue;
+      visited.add(visitKey);
+      placeTree(node.deps, chain);
+    }
+  }
+  for (const [name, node] of rootEdges) {
+    const visitKey = `${name}|${name}@${node.version}`;
+    if (!visited.has(visitKey)) {
+      visited.add(visitKey);
+      placeTree(node.deps, [name]);
     }
   }
   return { root, nested };
@@ -235,8 +268,8 @@ async function install(opts) {
   }
 
   const lock = loadLockfile(cwd);
-  const { chosen, nodeInfo } = await resolveGraph(rootDeps, lock, shouldCancel, onStderr);
-  const { root, nested } = planLayout(chosen, nodeInfo);
+  const { rootEdges, nodeInfo } = await resolveGraph(rootDeps, lock, shouldCancel, onStderr);
+  const { root, nested } = planLayout(rootEdges, nodeInfo);
 
   // Download everything.
   const allItems = [];
@@ -270,17 +303,19 @@ async function install(opts) {
     const meta = nodeInfo.get(`${name}@${version}`);
     extractOne(meta, path.join(nmDir, name));
   }
-  // Nested: install inside every consumer's node_modules? Simplification:
-  // nest under a synthetic path root only when conflict. We nest the lower
-  // versions under `node_modules/<name>/` is already taken — instead nest
-  // under each dependent. To keep this tractable we nest them at
-  // node_modules/.nodehost-nested/<name>@<version> and ALSO under the root
-  // name path only if the root slot differs — the bin resolver only consults
-  // .bin and package bin fields, and Node's require walks up, so true nesting
-  // correctness for conflicting transitive deps is best-effort here.
+  // Nested: npm-style per-dependent placement so Node's own resolution finds
+  // the right version: chain ['dep-a'] + name 'dep-c' lands at
+  // node_modules/dep-a/node_modules/dep-c.
   for (const n of nested) {
+    if (shouldCancel()) return 130;
     const meta = nodeInfo.get(`${n.name}@${n.version}`);
-    extractOne(meta, path.join(nmDir, '.nodehost-nested', `${n.name}@${n.version}`));
+    // n.chain ends with the package's own name; the segments before it are
+    // the dependent chain that scopes this copy.
+    const dest = n.chain.slice(0, -1).reduce(
+      (dir, segment) => path.join(dir, segment, 'node_modules'),
+      nmDir
+    );
+    extractOne(meta, path.join(dest, n.name));
   }
 
   for (const name of nativeWarnings) {
