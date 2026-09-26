@@ -170,104 +170,30 @@ public actor MLXEngine: LocalModelEngine {
         }
 
         // Stop sequences: per-request stops aren't a `GenerateParameters` knob
-        // (they live on ModelConfiguration). Enforce them here: accumulate text,
-        // halt when any stop string appears, and truncate at (but include) the
-        // stop marker so the parser downstream sees a complete <tool_call>.
-        let stopSequences = parameters.stopSequences.filter { !$0.isEmpty }
+        // (they live on ModelConfiguration). Enforce them here with the shared
+        // StopSequenceFilter: halt when any stop string appears and truncate
+        // at (but include) the stop marker so the parser downstream sees a
+        // complete <tool_call>.
+        var stopFilter = StopSequenceFilter(stopSequences: parameters.stopSequences)
 
         do {
             let input = try await container.prepare(input: UserInput(chat: chatMessages))
             let stream = try await container.generate(input: input, parameters: params)
-            var accumulated = ""
-            var hitStop = false
-            var pendingTail = ""
             for await generation in stream {
                 try Task.checkCancellation()
-                if hitStop { break }
                 guard case .chunk(let text) = generation else { continue }
-                if stopSequences.isEmpty {
-                    continuation.yield(text)
-                    continue
-                }
-                // Append to a small buffer; only emit the prefix that cannot
-                // contain the start of a stop string. This avoids leaking the
-                // first half of "</tool_call>" if the chunk boundary splits it.
-                pendingTail += text
-                if let emit = Self.drainablePrefix(of: &pendingTail, stops: stopSequences) {
-                    accumulated += emit
-                    if let stopHit = Self.firstStop(in: accumulated, stops: stopSequences) {
-                        // finalText is accumulated truncated just past the stop marker.
-                        let finalCount = stopHit.lowerBoundOffset + stopHit.length
-                        let alreadyStreamed = accumulated.count - pendingTail.count
-                        if finalCount > alreadyStreamed {
-                            let emitTail = String(accumulated.dropFirst(alreadyStreamed).prefix(finalCount - alreadyStreamed))
-                            continuation.yield(emitTail)
-                        }
-                        hitStop = true
-                        break
-                    }
-                    continuation.yield(emit)
-                }
+                let r = stopFilter.feed(text)
+                if !r.emit.isEmpty { continuation.yield(r.emit) }
+                if r.stopped { break }
             }
-            if !hitStop, !stopSequences.isEmpty, !pendingTail.isEmpty {
-                accumulated += pendingTail
-                if let stopHit = Self.firstStop(in: accumulated, stops: stopSequences) {
-                    let finalCount = stopHit.lowerBoundOffset + stopHit.length
-                    let alreadyStreamed = accumulated.count - pendingTail.count
-                    if finalCount > alreadyStreamed {
-                        let emitTail = String(accumulated.dropFirst(alreadyStreamed).prefix(finalCount - alreadyStreamed))
-                        continuation.yield(emitTail)
-                    }
-                } else {
-                    continuation.yield(pendingTail)
-                }
-            }
+            let tail = stopFilter.finish()
+            if !tail.isEmpty { continuation.yield(tail) }
             continuation.finish()
         } catch is CancellationError {
             continuation.finish()
         } catch {
             continuation.finish(throwing: error)
         }
-    }
-
-    /// Pop the longest prefix of `buffer` that definitely does not contain the
-    /// start of any stop string. Returns nil if the buffer is too small to
-    /// decide (caller should wait for more text).
-    private static func drainablePrefix(of buffer: inout String, stops: [String]) -> String? {
-        // The largest stop prefix that could match at the tail determines how
-        // much is safe to release. We conservatively keep the last
-        // (maxStopLength - 1) characters buffered.
-        let maxStop = stops.map(\.count).max() ?? 0
-        guard buffer.count >= maxStop else { return nil }
-        let keep = maxStop - 1
-        let emitCount = buffer.count - keep
-        let emit = String(buffer.prefix(emitCount))
-        buffer = String(buffer.suffix(keep))
-        return emit
-    }
-
-    /// Find the earliest occurrence of any stop string. Returns the character
-    /// offset of the match start (from `text.startIndex`) and the matched
-    /// stop's character length. Offsets (not String.Index) are returned
-    /// because indices from `range(of:)` are not portable across String values.
-    private static func firstStop(
-        in text: String,
-        stops: [String]
-    ) -> (lowerBoundOffset: Int, length: Int)? {
-        var best: (Int, Int)? = nil
-        for stop in stops {
-            if let range = text.range(of: stop) {
-                let offset = text.distance(from: text.startIndex, to: range.lowerBound)
-                if let current = best {
-                    if offset < current.0 {
-                        best = (offset, stop.count)
-                    }
-                } else {
-                    best = (offset, stop.count)
-                }
-            }
-        }
-        return best
     }
 
     // MARK: - Memory warnings

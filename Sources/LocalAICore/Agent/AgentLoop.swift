@@ -266,9 +266,13 @@ public actor AgentLoop {
             let stream = engine.generate(messages: trimmed, parameters: params)
             // Track think-block state across deltas. We never surface <think>
             // content in the UI, never save it to history, and never feed it
-            // to the tool parser.
+            // to the tool parser. Loop-level stop enforcement runs through
+            // StopSequenceFilter so a misbehaving engine still gets cut off —
+            // the filter guarantees everything up to and including the first
+            // stop string is emitted exactly once, with no drop/duplicate.
             var inThinkBlock = false
             var thinkBuffer = ""
+            var stopFilter = StopSequenceFilter(stopSequences: params.stopSequences)
             do {
                 for try await delta in stream {
                     if Task.isCancelled { break }
@@ -276,29 +280,26 @@ public actor AgentLoop {
                     inThinkBlock = split.nowInThink
                     let visibleChunk = split.visible
                     if visibleChunk.isEmpty { continue }
-                    assistantText += visibleChunk
-                    // Loop-level stop enforcement: the engine honors
-                    // GenerationParameters.stopSequences, but we re-check here
-                    // so a misbehaving engine still gets cut off. Truncate at
-                    // (and including) the first stop marker.
-                    if let stopHit = Self.firstStop(in: assistantText, stops: params.stopSequences) {
-                        let end = assistantText.index(assistantText.startIndex, offsetBy: stopHit.lowerBoundOffset + stopHit.length)
-                        let finalText = String(assistantText[..<end])
-                        let overflow = assistantText.count - finalText.count
-                        assistantText = finalText
-                        let visibleBeforeStop = visibleChunk.count - overflow
-                        if visibleBeforeStop > 0 {
-                            let emitted = String(visibleChunk.prefix(visibleBeforeStop))
-                            let stripped = Self.visibleDelta(emitted)
-                            if !stripped.isEmpty {
-                                continuation.yield(.assistantDelta(stripped))
-                            }
+                    let r = stopFilter.feed(visibleChunk)
+                    if !r.emit.isEmpty {
+                        assistantText += r.emit
+                        let stripped = Self.visibleDelta(r.emit)
+                        if !stripped.isEmpty {
+                            continuation.yield(.assistantDelta(stripped))
                         }
-                        break
                     }
-                    let stripped = Self.visibleDelta(visibleChunk)
-                    if !stripped.isEmpty {
-                        continuation.yield(.assistantDelta(stripped))
+                    if r.stopped { break }
+                }
+                // Flush any held tail only if the stream ended without a stop
+                // and without cancellation.
+                if !Task.isCancelled {
+                    let tail = stopFilter.finish()
+                    if !tail.isEmpty {
+                        assistantText += tail
+                        let stripped = Self.visibleDelta(tail)
+                        if !stripped.isEmpty {
+                            continuation.yield(.assistantDelta(stripped))
+                        }
                     }
                 }
             } catch {
@@ -502,31 +503,6 @@ public actor AgentLoop {
         }
         out += s
         return out
-    }
-
-    /// Find the earliest occurrence of any stop string. Returns the character
-    /// offset of the match start (from `text.startIndex`) and the matched
-    /// stop's character length so callers can include the marker in their
-    /// output. Returns character offsets (not String.Index) because indices
-    /// from `range(of:)` are not portable across String values.
-    static func firstStop(
-        in text: String,
-        stops: [String]
-    ) -> (lowerBoundOffset: Int, length: Int)? {
-        var best: (Int, Int)? = nil
-        for stop in stops where !stop.isEmpty {
-            if let range = text.range(of: stop) {
-                let offset = text.distance(from: text.startIndex, to: range.lowerBound)
-                if let current = best {
-                    if offset < current.0 {
-                        best = (offset, stop.count)
-                    }
-                } else {
-                    best = (offset, stop.count)
-                }
-            }
-        }
-        return best
     }
 
     private static func summarize(_ output: String) -> String {
