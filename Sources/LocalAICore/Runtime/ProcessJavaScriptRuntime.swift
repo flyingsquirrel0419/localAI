@@ -1,6 +1,23 @@
 #if os(macOS) || os(Linux)
 import Foundation
 
+/// Locates a node/npm executable. Prefers the conventional /usr/bin path
+/// (Linux containers); falls back to a PATH lookup so macOS runners with
+/// Homebrew-installed Node (/opt/homebrew/bin, /usr/bin is SIP read-only)
+/// work without configuration.
+public enum NodePathResolver {
+    public static func resolve(_ name: String) -> String {
+        let usrBin = "/usr/bin/\(name)"
+        if FileManager.default.isExecutableFile(atPath: usrBin) { return usrBin }
+        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for dir in pathEnv.split(separator: ":") {
+            let candidate = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        return usrBin // keep the conventional default; launch will fail loudly
+    }
+}
+
 /// JavaScriptRuntimeService backed by system `node` / `npm` via Process.
 /// Streams stdout/stderr, enforces a wall-clock timeout, and kills the child
 /// on task cancellation.
@@ -156,20 +173,3 @@ public final class ProcessJavaScriptRuntime: JavaScriptRuntimeService, @unchecke
     }
 }
 #endif
-
-/// Locates a node/npm executable. Prefers the conventional /usr/bin path
-/// (Linux containers); falls back to a PATH lookup so macOS runners with
-/// Homebrew-installed Node (/opt/homebrew/bin, /usr/bin is SIP read-only)
-/// work without configuration.
-enum NodePathResolver {
-    static func resolve(_ name: String) -> String {
-        let usrBin = "/usr/bin/\(name)"
-        if FileManager.default.isExecutableFile(atPath: usrBin) { return usrBin }
-        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        for dir in pathEnv.split(separator: ":") {
-            let candidate = "\(dir)/\(name)"
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
-        }
-        return usrBin // keep the conventional default; launch will fail loudly
-    }
-}
