@@ -185,15 +185,30 @@ public final class ModelService: ObservableObject {
         let progressStream = await downloader.progressStream()
         downloadTask = Task { [weak self] in
             guard let self else { return }
-            // Drive progress.
+            // Drive progress — into the row state and, on iOS 26+, into the
+            // system-visible continued-processing task UI.
             let progressTask = Task { [weak self] in
                 for await progress in progressStream {
                     await self?.updateRowState(id: row.id, state: .downloading(progress))
+                    let total = max(progress.totalBytes, 1)
+                    await BackgroundTaskCoordinator.shared.updateProgress(
+                        kind: .modelDownload,
+                        completed: progress.bytesDownloaded,
+                        total: total,
+                        subtitle: progress.currentFile.isEmpty ? nil : progress.currentFile
+                    )
                 }
             }
 
             do {
-                try await downloader.start()
+                try await BackgroundTaskCoordinator.shared.perform(
+                    kind: .modelDownload,
+                    onExpiration: {
+                        Task { await downloader.pause() }
+                    }
+                ) {
+                    try await downloader.start()
+                }
                 progressTask.cancel()
                 await MainActor.run {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -236,10 +251,24 @@ public final class ModelService: ObservableObject {
             let progressTask = Task { [weak self] in
                 for await progress in progressStream {
                     await self?.updateRowState(id: repoID, state: .downloading(progress))
+                    let total = max(progress.totalBytes, 1)
+                    await BackgroundTaskCoordinator.shared.updateProgress(
+                        kind: .modelDownload,
+                        completed: progress.bytesDownloaded,
+                        total: total,
+                        subtitle: progress.currentFile.isEmpty ? nil : progress.currentFile
+                    )
                 }
             }
             do {
-                try await downloader.start()
+                try await BackgroundTaskCoordinator.shared.perform(
+                    kind: .modelDownload,
+                    onExpiration: {
+                        Task { await downloader.pause() }
+                    }
+                ) {
+                    try await downloader.start()
+                }
                 progressTask.cancel()
                 await self.refreshDownloaded()
             } catch {

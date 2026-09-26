@@ -87,12 +87,10 @@ jobs:
           grep -q "int node_start" \
             App/Frameworks/NodeMobile.xcframework/ios-arm64/NodeMobile.framework/Headers/NodeMobile.h
 
-      # Verify the BackgroundTasks APIs we plan to use actually exist in the
-      # SDK the runner ships. BGContinuedProcessingTask ships with iOS 26 but
-      # its declarations may live in BGTaskScheduler.h / BGTaskRequest.h
-      # rather than a same-named header. If it's missing, our coordinator
-      # gate (`compiler(>=6.2)` + `#available(iOS 26,*)`) compiles it out
-      # gracefully — but we want to know.
+      # Verify the BackgroundTasks APIs we use actually exist in the SDK the
+      # runner ships, and print the exact declarations so the Swift-facing API
+      # surface (init signatures, request properties, progress/completion
+      # methods) is reviewable in the CI log.
       - name: Verify iOS 26 BackgroundTasks API
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -101,7 +99,9 @@ jobs:
           ls "$HEADERS_DIR" || true
           if xcodebuild -version | grep -q "Xcode 26"; then
             if grep -rq "BGContinuedProcessingTask" "$HEADERS_DIR"; then
-              echo "BGContinuedProcessingTask found in SDK headers."
+              echo "=== BGContinuedProcessingTask declarations ==="
+              grep -r -B 2 -A 12 "BGContinuedProcessingTask" "$HEADERS_DIR" || true
+              echo "=== end ==="
             else
               echo "::warning::BGContinuedProcessingTask not present in SDK headers (Xcode 26 SDK). The iOS 26 code path in BackgroundTaskCoordinator will be compiled out at the SDK boundary; begin/end background task protection still applies."
             fi
@@ -140,6 +140,30 @@ jobs:
             grep -E "error:" build.log | sort -u || true
             exit 1
           fi
+
+      # Prove the Node runtime actually shipped in the bundle — that the
+      # framework was embedded, the NodeHost folder reference was copied, and
+      # the app binary links NodeMobile (i.e. `#if canImport(NodeMobile)` was
+      # true, so NodeMobileLauncher compiled its real path, not the fallback).
+      - name: Assert Node runtime in built app
+        run: |
+          set -e
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData \
+            -path '*Build/Products/Debug-iphoneos/LocalAI.app' -maxdepth 6 \
+            -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Built LocalAI.app not found in DerivedData"
+            exit 1
+          fi
+          echo "Built app: $APP_PATH"
+          test -d "$APP_PATH/Frameworks/NodeMobile.framework" \
+            || { echo "::error::Frameworks/NodeMobile.framework missing from LocalAI.app"; exit 1; }
+          test -f "$APP_PATH/NodeHost/host.js" \
+            || { echo "::error::NodeHost/host.js missing from LocalAI.app"; exit 1; }
+          otool -L "$APP_PATH/LocalAI" | tee otool.log
+          grep -q "NodeMobile" otool.log \
+            || { echo "::error::LocalAI binary does not link NodeMobile — canImport(NodeMobile) was false at build time"; exit 1; }
+          echo "Node runtime present: NodeMobile.framework embedded, NodeHost bundled, binary links NodeMobile."
 
       # JavaScriptRuntime/NodeHostRuntime/AgentAcceptance tests spawn node/npm.
       # /usr/bin is SIP read-only on macOS, so core resolves node from PATH

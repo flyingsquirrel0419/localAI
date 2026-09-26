@@ -80,6 +80,9 @@ public final class AgentRunner: ObservableObject {
     private var confirmationContinuation: CheckedContinuation<Bool, Never>?
     private var runTask: Task<Void, Never>?
     private var activeLoop: AgentLoop?
+    #if canImport(UIKit)
+    private var memoryWarningObserver: NSObjectProtocol?
+    #endif
 
     public init(
         engine: MLXEngine,
@@ -95,7 +98,32 @@ public final class AgentRunner: ObservableObject {
         self.credentialProvider = credentialProvider
         self.taskStore = taskStore
         self.runtimeCoordinator = runtimeCoordinator
+
+        #if canImport(UIKit)
+        // Explicit checkpoint-on-memory-warning: when iOS warns about memory
+        // pressure mid-run (e.g. a large model + a big diff in memory), save
+        // a checkpoint and stop the loop instead of relying on the engine's
+        // cancellation side effect. If we're idle this is a no-op.
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                self.checkpointAndStop()
+            }
+        }
+        #endif
     }
+
+    #if canImport(UIKit)
+    deinit {
+        if let memoryWarningObserver {
+            NotificationCenter.default.removeObserver(memoryWarningObserver)
+        }
+    }
+    #endif
 
     // MARK: - Lifecycle
 
@@ -329,6 +357,7 @@ public final class AgentRunner: ObservableObject {
         var assistantText = ""
         var assistantID: UUID?
         var sawLocalCommit = false
+        var toolsCompleted = 0
 
         for await event in stream {
             if Task.isCancelled { break }
@@ -372,6 +401,15 @@ public final class AgentRunner: ObservableObject {
                         sawLocalCommit = true
                     }
                 }
+                // Keep the iOS 26 continued-processing task's system UI
+                // moving; stalled tasks may be expired by the system.
+                toolsCompleted += 1
+                BackgroundTaskCoordinator.shared.updateProgress(
+                    kind: .agentRun,
+                    completed: Int64(toolsCompleted),
+                    total: Int64(toolsCompleted + 1),
+                    subtitle: summary.isEmpty ? nil : String(summary.prefix(60))
+                )
                 #if canImport(UIKit)
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 #endif
