@@ -79,14 +79,13 @@ public final class ModelService: ObservableObject {
         }
         for model in downloaded {
             let state: ModelRowState = (model.id == activeID) ? .active(model) : .downloaded(model)
+            // HFRepoReference's memberwise init is internal; use the public parser.
+            // `model.repo` is canonical "org/name" so parse always succeeds; if it
+            // somehow fails (corrupt store), skip the row rather than crash.
+            guard let repoRef = try? HFRepoReference.parse(model.repo) else { continue }
             rows.append(ModelRow(
                 id: model.id,
-                repo: HFRepoReference(
-                    organization: model.repo.split(separator: "/").first.map(String.init) ?? "",
-                    name: model.repo.split(separator: "/").dropFirst().first.map(String.init) ?? "",
-                    revision: model.revision,
-                    filePath: nil
-                ),
+                repo: repoRef,
                 info: nil,
                 state: state
             ))

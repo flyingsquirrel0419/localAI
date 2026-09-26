@@ -379,7 +379,9 @@ struct LoginView: View {
     }
 }
 
-extension GitHubAuthService.DeviceCode: @retroactive Identifiable {
+// DeviceCode is declared in this module (App/Sources/Services), so plain
+// conformance is fine — `@retroactive` is only for cross-module conformances.
+extension GitHubAuthService.DeviceCode: Identifiable {
     public var id: String { deviceCode }
 }
 

@@ -13,6 +13,23 @@ public struct DownloadProgress: Sendable, Equatable {
     public let bytesPerSecond: Double
     public let currentFile: String
     public let state: DownloadState
+
+    /// Public memberwise init so the app target can construct placeholder
+    /// progress values (e.g. "queued" before the downloader emits its first
+    /// event). Without this the synthesized memberwise init is internal.
+    public init(
+        bytesDownloaded: Int64,
+        totalBytes: Int64,
+        bytesPerSecond: Double,
+        currentFile: String,
+        state: DownloadState
+    ) {
+        self.bytesDownloaded = bytesDownloaded
+        self.totalBytes = totalBytes
+        self.bytesPerSecond = bytesPerSecond
+        self.currentFile = currentFile
+        self.state = state
+    }
 }
 
 public enum DownloadError: Error, Equatable, Sendable {

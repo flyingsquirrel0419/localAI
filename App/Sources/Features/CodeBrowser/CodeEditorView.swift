@@ -171,11 +171,13 @@ struct CodeTextView: UIViewRepresentable {
             guard !indent.isEmpty else { return true }
             let insertion = "\n" + indent
             let target = NSRange(location: range.location, length: range.length)
-            if textView.shouldChangeText(in: target, replacementText: insertion) {
-                textView.textStorage.replaceCharacters(in: target, with: insertion)
-                textView.selectedRange = NSRange(location: target.location + insertion.count, length: 0)
-                textViewDidChange(textView)
-            }
+            // Bypass UITextView.shouldChangeText(in: UITextRange, ...) — that instance
+            // method expects a UITextRange and would tell the text system to perform
+            // the change itself. We are already inside the delegate callback and have
+            // decided to take over the mutation, so apply it directly via textStorage.
+            textView.textStorage.replaceCharacters(in: target, with: insertion)
+            textView.selectedRange = NSRange(location: target.location + insertion.count, length: 0)
+            textViewDidChange(textView)
             return false
         }
 

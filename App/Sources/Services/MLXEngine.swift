@@ -4,6 +4,9 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
+// Required by the `#huggingFaceTokenizerLoader()` macro: its expansion
+// references `Tokenizers.AutoTokenizer` and `Tokenizers.Tokenizer` directly.
+import Tokenizers
 #if canImport(UIKit)
 import UIKit
 #endif
