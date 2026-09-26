@@ -28,7 +28,6 @@ public actor MLXEngine: LocalModelEngine {
 
     private var state: State = .unloaded
     private var container: ModelContainer?
-    private var session: ChatSession?
     private var memoryObserver: NSObjectProtocol?
 
     /// Continuation notified on memory warnings so a streaming `generate` call
@@ -72,7 +71,6 @@ public actor MLXEngine: LocalModelEngine {
                 using: #huggingFaceTokenizerLoader()
             )
             self.container = container
-            self.session = ChatSession(container)
             state = .loaded(modelDirectory: modelDirectory)
         } catch {
             state = .failed(SecretRedactor.redact(String(describing: error)))
@@ -83,7 +81,6 @@ public actor MLXEngine: LocalModelEngine {
     }
 
     public func unload() async {
-        session = nil
         container = nil
         state = .unloaded
         MLX.Memory.clearCache()
@@ -124,44 +121,58 @@ public actor MLXEngine: LocalModelEngine {
         parameters: GenerationParameters,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async {
-        guard let session = self.session else {
+        guard let container = self.container else {
             continuation.finish(throwing: ModelEngineError.notLoaded)
             return
         }
 
-        // Build ChatSession parameters from core GenerationParameters.
+        // Build GenerateParameters from the core type.
         var params = GenerateParameters()
         params.temperature = Float(parameters.temperature)
         params.topP = Float(parameters.topP)
         params.maxTokens = parameters.maxTokens
-        session.generateParameters = params
 
         // Translate our messages into MLX chat messages. The first system
-        // message (if any) becomes the session instructions; the remainder
-        // are passed as history.
-        var history: [Chat.Message] = []
+        // message (if any) becomes the session instructions; the LAST user
+        // message is what we stream against; everything before it becomes the
+        // session's prior history.
         var instructions: String? = nil
+        var prior: [Chat.Message] = []
+        var latestUser: Chat.Message? = nil
         for message in messages {
             switch message.role {
             case .system:
                 if instructions == nil {
                     instructions = message.content
                 } else {
-                    history.append(Chat.Message(role: .system, content: message.content))
+                    prior.append(Chat.Message(role: .system, content: message.content))
                 }
             case .user:
-                history.append(Chat.Message(role: .user, content: message.content))
+                if let previous = latestUser {
+                    prior.append(previous)
+                }
+                latestUser = Chat.Message(role: .user, content: message.content)
             case .assistant:
-                history.append(Chat.Message(role: .assistant, content: message.content))
+                prior.append(Chat.Message(role: .assistant, content: message.content))
             case .tool:
-                // Tools not yet wired; surface as user-typed context.
-                history.append(Chat.Message(role: .user, content: message.content))
+                prior.append(Chat.Message(role: .user, content: message.content))
             }
         }
-        session.instructions = instructions
+        guard let latest = latestUser else {
+            continuation.finish(throwing: ModelEngineError.notLoaded)
+            return
+        }
+
+        // Build a fresh ChatSession for this turn, rehydrating prior history.
+        let session = ChatSession(
+            container,
+            instructions: instructions,
+            history: prior,
+            generateParameters: params
+        )
 
         do {
-            let stream = session.streamResponse(to: history)
+            let stream = session.streamResponse(to: latest.content)
             for try await chunk in stream {
                 try Task.checkCancellation()
                 continuation.yield(chunk)

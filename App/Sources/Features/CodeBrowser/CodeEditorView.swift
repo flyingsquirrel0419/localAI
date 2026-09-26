@@ -116,10 +116,10 @@ struct CodeTextView: UIViewRepresentable {
         textView.textContainer.widthTracksTextView = false
         textView.textContainer.size = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
-        // Find interaction (iOS 16+).
+        // Find interaction (iOS 16+): UITextView ships with a built-in find
+        // session; just enable the interaction.
         if #available(iOS 16.0, *) {
-            let findInteraction = UIFindInteraction(sessionDelegate: nil)
-            textView.addInteraction(findInteraction)
+            textView.isFindInteractionEnabled = true
         }
 
         // Gutter via an exclusion path on the left.

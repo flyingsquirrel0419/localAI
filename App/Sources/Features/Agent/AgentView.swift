@@ -96,7 +96,8 @@ struct AgentChatView: View {
 
         isGenerating = true
         let engine = modelService.engine
-        let history = messages
+        // History passed to the engine excludes the empty placeholder we just added.
+        let history = messages.filter { $0.id != assistantID }
         currentTask = Task {
             let stream = await engine.generate(messages: history, parameters: .default)
             var received = ""
