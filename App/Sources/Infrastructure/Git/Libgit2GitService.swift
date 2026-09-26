@@ -237,7 +237,7 @@ public actor Libgit2GitService: GitService {
     public func pull(in directory: URL, credentials: GitCredentials?) async throws -> GitPullResult {
         do {
             let repo = try repository(at: directory)
-            let branchName = try currentBranch(in: directory)
+            let branchName = try await currentBranch(in: directory)
             let beforeOID: OID? = repo.isHeadUnborn ? nil : try? repo.head().resolveToCommit().oid
 
             var pullOpts = Repository.PullOptions()
@@ -285,7 +285,12 @@ public actor Libgit2GitService: GitService {
         _ = force
         do {
             let repo = try repository(at: directory)
-            let branchName = try branch ?? currentBranch(in: directory)
+            let branchName: String
+            if let branch {
+                branchName = branch
+            } else {
+                branchName = try await currentBranch(in: directory)
+            }
             let spec = Refspec("refs/heads/\(branchName):refs/heads/\(branchName)")
             var opts = Repository.PushOptions()
             opts.credentials = credentialsHandler(for: credentials)
@@ -299,7 +304,7 @@ public actor Libgit2GitService: GitService {
     public func branches(in directory: URL) async throws -> [GitBranch] {
         do {
             let repo = try repository(at: directory)
-            let currentShort = repo.isHeadUnborn ? nil : try? currentBranch(in: directory)
+            let currentShort = repo.isHeadUnborn ? nil : try? await currentBranch(in: directory)
             var out: [GitBranch] = []
             for ref in repo.references() {
                 let name = ref.name
@@ -372,7 +377,7 @@ public actor Libgit2GitService: GitService {
         do {
             let repo = try repository(at: directory)
             guard !repo.isHeadUnborn else { return 0 }
-            let branch = try currentBranch(in: directory)
+            let branch = try await currentBranch(in: directory)
             guard let tracking = try repo.reference(named: "refs/remotes/origin/\(branch)") else {
                 return 0
             }

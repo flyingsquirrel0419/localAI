@@ -187,7 +187,7 @@ final class RawRepo {
         var headRaw: OpaquePointer?
         guard git_repository_head(&headRaw, handle) == 0, let headRaw else { return nil }
         defer { git_reference_free(headRaw) }
-        guard git_reference_is_symbolic(headRaw) != 0,
+        guard git_reference_type(headRaw) == GIT_REFERENCE_SYMBOLIC,
               let target = git_reference_symbolic_target(headRaw) else { return nil }
         let name = String(cString: target)
         if name.hasPrefix("refs/heads/") {
