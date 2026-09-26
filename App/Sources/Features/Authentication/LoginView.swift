@@ -379,11 +379,11 @@ struct LoginView: View {
     }
 }
 
-extension GitHubAuthService.DeviceCode: Identifiable {
+extension GitHubAuthService.DeviceCode: @retroactive Identifiable {
     public var id: String { deviceCode }
 }
 
-extension UserFacingError: Identifiable {
+extension UserFacingError: @retroactive Identifiable {
     public var id: String { title + message + developerDetails }
 }
 

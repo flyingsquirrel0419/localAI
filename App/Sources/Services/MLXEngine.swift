@@ -86,13 +86,15 @@ public actor MLXEngine: LocalModelEngine {
         MLX.Memory.clearCache()
     }
 
-    public func generate(
+    /// Protocol requirement is nonisolated; we bounce into the actor to set
+    /// up state, then run the actual generation in a Task.
+    public nonisolated func generate(
         messages: [ChatMessage],
         parameters: GenerationParameters
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
-            self.activeContinuation = continuation
             let task = Task {
+                await self.setActiveContinuation(continuation)
                 await self.runGeneration(
                     messages: messages,
                     parameters: parameters,
@@ -101,20 +103,22 @@ public actor MLXEngine: LocalModelEngine {
             }
             continuation.onTermination = { _ in
                 task.cancel()
-                Task { await self.clearActiveContinuation(continuation) }
+                Task { await self.clearActiveContinuation() }
             }
         }
     }
 
-    // MARK: - Internals
-
-    private func clearActiveContinuation(
+    private func setActiveContinuation(
         _ continuation: AsyncThrowingStream<String, Error>.Continuation
     ) {
-        if activeContinuation != nil {
-            activeContinuation = nil
-        }
+        self.activeContinuation = continuation
     }
+
+    private func clearActiveContinuation() {
+        self.activeContinuation = nil
+    }
+
+    // MARK: - Internals
 
     private func runGeneration(
         messages: [ChatMessage],
