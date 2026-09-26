@@ -108,8 +108,9 @@ public final class NodeRuntimeCoordinator: ObservableObject {
 /// back to /dev/urandom via `SystemRandomNumberGenerator`).
 private func SecRandomCopyBytesCompat(_ bytes: inout [UInt8]) -> Int32 {
     #if canImport(Security)
+    let count = bytes.count
     return bytes.withUnsafeMutableBytes { ptr in
-        SecRandomCopyBytes(kSecRandomDefault, bytes.count, ptr.baseAddress!)
+        SecRandomCopyBytes(kSecRandomDefault, count, ptr.baseAddress!)
     }
     #else
     var generator = SystemRandomNumberGenerator()
