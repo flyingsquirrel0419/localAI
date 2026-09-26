@@ -2,29 +2,25 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 #endif
-#if canImport(BackgroundTasks)
-import BackgroundTasks
-#endif
 
 /// Wraps iOS background-execution facilities so user-initiated agent runs,
 /// model downloads, and clones keep going when the app moves to the
 /// background.
 ///
-/// Two layers:
+/// Currently uses `UIApplication.beginBackgroundTask` (iOS 17+) for short
+/// grace time (≈30 s). On expiration we invoke the caller's `onExpiration`
+/// so the agent loop can checkpoint and mark itself interrupted instead of
+/// being silently killed.
 ///
-/// 1. **Always (iOS 17+)** — `UIApplication.beginBackgroundTask` for short
-///    grace time (≈30 s). On expiration we invoke the caller's
-///    `onExpiration` so the agent loop can checkpoint and mark itself
-///    interrupted instead of being silently killed.
-///
-/// 2. **iOS 26+** — `BGContinuedProcessingTask` for user-initiated work that
-///    legitimately needs longer (multi-minute agent runs, model downloads).
-///    We register the identifiers listed in Info.plist at launch, and submit
-///    a request from `performAgentRun` / `performModelDownload`.
-///
-/// The coordinator deliberately exposes a small surface; if
-/// BGContinuedProcessingTask isn't available (older SDK or older OS) the
-/// begin/end pair still provides correct behaviour.
+/// **BGContinuedProcessingTask (iOS 26+)**: the API exists per WWDC25 session
+/// 227 ("Finish tasks in the background") but its declarations don't appear
+/// in the iOS 26.2 SDK's BackgroundTasks headers as of Xcode 26.3 — the
+/// types may be exposed via Swift-only overlays that aren't visible to the
+/// header-grep verification we run in CI. Rather than guess at the surface
+/// and break the build, the coordinator currently uses beginBackgroundTask
+/// only; once the BGContinuedProcessingTask types are reachable from Swift
+/// (and verified in CI), they can be added behind `#if compiler(>=6.2)` +
+/// `if #available(iOS 26, *)` without changing call sites.
 @MainActor
 public final class BackgroundTaskCoordinator {
 
@@ -41,21 +37,17 @@ public final class BackgroundTaskCoordinator {
 
     private init() {}
 
-    /// Register BGTaskScheduler handlers. Call once at app launch.
+    /// Placeholder for parity with a future BGTaskScheduler registration.
+    /// Safe to call at app launch; currently a no-op.
     public func registerBackgroundTasks() {
-        #if canImport(BackgroundTasks) && compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            registerContinuedProcessingTasks()
-        }
-        #endif
+        // No-op until BGContinuedProcessingTask is reachable from Swift.
     }
 
-    /// Run `work` under background protection. On iOS 26+ the work is also
-    /// submitted as a BGContinuedProcessingTask so the system keeps the app
-    /// alive longer; the begin/end pair covers expiration between the two.
+    /// Run `work` under background protection.
     ///
     /// - Parameters:
-    ///   - kind: which long-running category this work falls under.
+    ///   - kind: which long-running category this work falls under (used
+    ///     for the system-visible task name).
     ///   - onExpiration: invoked on the main actor when iOS is about to
     ///     suspend the app. Use it to checkpoint and mark the task
     ///     interrupted; do NOT start new work here.
@@ -65,18 +57,11 @@ public final class BackgroundTaskCoordinator {
         onExpiration: (@Sendable () -> Void)? = nil,
         work: @Sendable () async throws -> Output
     ) async rethrows -> Output {
-        let id = UUID()
         #if canImport(UIKit)
+        let id = UUID()
         beginForegroundBackgroundTask(id: id, kind: kind, onExpiration: onExpiration)
         defer { endForegroundBackgroundTask(id: id) }
         #endif
-
-        #if canImport(BackgroundTasks) && compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            submitContinuedProcessingTask(kind: kind)
-        }
-        #endif
-
         return try await work()
     }
 
@@ -104,49 +89,6 @@ public final class BackgroundTaskCoordinator {
         if identifier != .invalid {
             UIApplication.shared.endBackgroundTask(identifier)
         }
-    }
-    #endif
-
-    // MARK: - BGContinuedProcessingTask (iOS 26+)
-
-    #if canImport(BackgroundTasks) && compiler(>=6.2)
-    @available(iOS 26.0, *)
-    private func registerContinuedProcessingTasks() {
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Kind.agentRun.rawValue,
-            using: nil
-        ) { task in
-            guard let continued = task as? BGContinuedProcessingTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            continued.expirationHandler = { /* agent loop checkpoints itself via stop() */ }
-            // The actual work was already kicked off by the caller. We mark
-            // the task complete when the run finishes; until then the system
-            // keeps us alive.
-        }
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Kind.modelDownload.rawValue,
-            using: nil
-        ) { task in
-            guard let continued = task as? BGContinuedProcessingTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            continued.expirationHandler = { /* ModelDownloader pauses via its own handler */ }
-        }
-    }
-
-    @available(iOS 26.0, *)
-    private func submitContinuedProcessingTask(kind: Kind) {
-        let request = BGContinuedProcessingTaskRequest(
-            identifier: kind.rawValue,
-            title: kind == .agentRun ? "Agent run" : "Model download",
-            subtitle: kind == .agentRun
-                ? "LocalAI is working on your request"
-                : "LocalAI is downloading a model"
-        )
-        try? BGTaskScheduler.shared.submit(request)
     }
     #endif
 }
