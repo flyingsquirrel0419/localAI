@@ -103,6 +103,22 @@ test('bad token rejected', async () => {
   c.close();
 });
 
+test('missing token rejected', async () => {
+  const c = makeClient();
+  c.send({ id: 'x2', cmd: 'ping' });
+  const msg = await c.waitFor((m) => m.id === 'x2' && m.type === 'error');
+  assert.match(msg.message, /unauthorized/);
+  c.close();
+});
+
+test('empty-string token rejected', async () => {
+  const c = makeClient();
+  c.send({ id: 'x3', token: '', cmd: 'ping' });
+  const msg = await c.waitFor((m) => m.id === 'x3' && m.type === 'error');
+  assert.match(msg.message, /unauthorized/);
+  c.close();
+});
+
 test('node runs a script and streams output', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodehost-e2e-'));
   fs.writeFileSync(path.join(dir, 'hello.js'), 'console.log("hello from worker"); console.error("oops");');

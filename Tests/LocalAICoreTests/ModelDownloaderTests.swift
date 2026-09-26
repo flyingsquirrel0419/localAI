@@ -194,6 +194,39 @@ final class ModelDownloaderTests: XCTestCase {
         _ = await collector.value
         XCTAssertTrue(sawRunning)
     }
+
+    // M5: server-supplied paths must never escape the model directory.
+    func testRejectsPathTraversal() async throws {
+        let streamer = MockByteStreamer()
+        streamer.bodies["evil.bin"] = Data("x".utf8)
+        let downloader = try makeDownloader(
+            streamer: streamer,
+            files: [ModelFileDownload(path: "../evil.bin", size: 1, sha256: nil)]
+        )
+        do {
+            try await downloader.start()
+            XCTFail("expected invalidPath")
+        } catch let DownloadError.invalidPath(path) {
+            XCTAssertEqual(path, "../evil.bin")
+        }
+        // Nothing should have been written outside the model directory.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: tempRoot.appendingPathComponent("evil.bin").path))
+    }
+
+    func testRejectsAbsolutePath() async throws {
+        let streamer = MockByteStreamer()
+        let downloader = try makeDownloader(
+            streamer: streamer,
+            files: [ModelFileDownload(path: "/etc/passwd", size: 1, sha256: nil)]
+        )
+        do {
+            try await downloader.start()
+            XCTFail("expected invalidPath")
+        } catch let DownloadError.invalidPath(path) {
+            XCTAssertEqual(path, "/etc/passwd")
+        }
+    }
 }
 
 final class ModelStoreTests: XCTestCase {

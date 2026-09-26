@@ -123,20 +123,43 @@ public actor ToolExecutor {
 
     /// Execute a validated tool call. All outputs are truncated + redacted.
     public func execute(_ call: ToolCall) async -> ToolExecutionResult {
+        if Task.isCancelled {
+            return .failure(message: "Cancelled.")
+        }
         let raw: ToolExecutionResult
         do {
             raw = try await dispatch(call)
+        } catch is CancellationError {
+            return .failure(message: "Cancelled.")
         } catch {
             raw = .failure(message: Self.describe(error))
         }
+        // Long-running tools (npm install, git push, runtime calls) can outlive
+        // a stop() — surface a clean cancellation rather than reporting
+        // success on stale state.
+        if Task.isCancelled, case .success = raw {
+            return .failure(message: "Cancelled.")
+        }
+        // Fetch live credentials once per call so their values are scrubbed
+        // from any output the model might echo back (in addition to the
+        // shape-based redactor's hf_/ghp_/etc. patterns).
+        let knownSecrets = await currentKnownSecrets()
         switch raw {
         case .success(let output):
-            return .success(output: Self.postProcess(output))
+            return .success(output: Self.postProcess(output, knownSecrets: knownSecrets))
         case .failure(let message):
-            return .failure(message: SecretRedactor.redact(message))
+            return .failure(message: SecretRedactor.redact(message, knownSecrets: knownSecrets))
         case .needsConfirmation:
             return raw
         }
+    }
+
+    /// Best-effort fetch of the current credential so `redact(knownSecrets:)`
+    /// can scrub it from tool output even when its shape isn't recognized.
+    private func currentKnownSecrets() async -> [String] {
+        guard let provider = context.credentialProvider else { return [] }
+        guard let creds = try? await provider.credentials(for: nil) else { return [] }
+        return [creds.password, creds.username].filter { !$0.isEmpty }
     }
 
     // MARK: - Dispatch
@@ -319,6 +342,14 @@ public actor ToolExecutor {
         guard let script = arg(call, "script") else {
             return .failure(message: "run_node requires \"script\".")
         }
+        // H4: script path must resolve strictly inside the workspace. Absolute
+        // paths and `..` traversal are rejected so a tool call cannot reach
+        // files outside the sandbox.
+        do {
+            _ = try context.fileSystem.resolve(script)
+        } catch {
+            return .failure(message: "run_node script must be a path inside the workspace: \(script)")
+        }
         let args = arrayArg(call, "args") ?? []
         let timeout = TimeInterval(intArg(call, "timeoutSeconds") ?? Int(ToolPolicy.defaultCommandTimeout))
         return try await collect(
@@ -418,8 +449,8 @@ public actor ToolExecutor {
 
     // MARK: - Output hygiene
 
-    static func postProcess(_ output: String) -> String {
-        var redacted = SecretRedactor.redact(output)
+    static func postProcess(_ output: String, knownSecrets: [String] = []) -> String {
+        var redacted = SecretRedactor.redact(output, knownSecrets: knownSecrets)
         if redacted.count > ToolPolicy.maxOutputChars {
             let head = redacted.prefix(ToolPolicy.maxOutputChars)
             redacted = String(head) + "\n… [truncated \(redacted.count - ToolPolicy.maxOutputChars) chars]"

@@ -85,7 +85,11 @@ public actor Libgit2GitService: GitService {
         // libgit2's `git_clone` is not yet wrapped, so compose it:
         // create → addRemote → fetch → checkout.
         let repo = try Repository.create(at: directory, bare: false, initialBranch: branch)
-        let remoteURLString = url.isFileURL ? url.path : url.absoluteString
+        // M6: never persist credentials in .git/config. Strip any userinfo
+        // the caller included in `url` and rely on the credentials callback
+        // for auth. If a credentialed URL was passed, log nothing about it.
+        let cleanedURL = Self.sanitizedRemoteURL(url)
+        let remoteURLString = cleanedURL.isFileURL ? cleanedURL.path : cleanedURL.absoluteString
         _ = try repo.createRemote(named: "origin", url: remoteURLString)
 
         var fetchOpts = Repository.FetchOptions()
@@ -104,6 +108,21 @@ public actor Libgit2GitService: GitService {
 
         let branchName = branch ?? (try? Self.discoverDefaultBranch(repo: repo)) ?? "main"
         try Self.checkoutClonedBranch(repo: repo, branchName: branchName)
+    }
+
+    /// Strip any userinfo (`user:pass@`) from an http(s) URL so credentials
+    /// never end up persisted to .git/config or echoed in errors. File and
+    /// non-URL inputs pass through unchanged.
+    static func sanitizedRemoteURL(_ url: URL) -> URL {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.user != nil || url.password != nil else {
+            return url
+        }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.user = nil
+        components?.password = nil
+        return components?.url ?? url
     }
 
     private static func fetchForClone(

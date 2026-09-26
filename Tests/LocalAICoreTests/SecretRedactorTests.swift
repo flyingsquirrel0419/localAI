@@ -47,4 +47,33 @@ final class SecretRedactorTests: XCTestCase {
         XCTAssertFalse(out.contains(hf))
         XCTAssertFalse(out.contains(gh))
     }
+
+    func testRedactsGitLabToken() {
+        let token = "glpat-abcdefghijklmnopqrstuv"
+        let out = SecretRedactor.redact("gitlab token: \(token)")
+        XCTAssertFalse(out.contains(token))
+        XCTAssertTrue(out.contains(SecretRedactor.replacement))
+    }
+
+    func testRedactsURLUserInfo() {
+        let input = "remote: https://user:ghp_abcdefghijklmnopqrs1234567890@github.com/org/repo"
+        let out = SecretRedactor.redact(input)
+        XCTAssertFalse(out.contains("user:ghp_"))
+        XCTAssertFalse(out.contains("ghp_abcdefghijklmnopqrs1234567890"))
+    }
+
+    func testRedacts40HexAfterAuthorizationLabel() {
+        let hex = String(repeating: "ab", count: 20) // 40 hex chars
+        let input = "Authorization: Bearer \(hex)"
+        let out = SecretRedactor.redact(input)
+        XCTAssertFalse(out.contains(hex))
+    }
+
+    func testLeavesBare40HexAlone() {
+        // Without an "authorization"/"token"/"bearer" label a 40-hex string
+        // could just be a git SHA — must not be redacted.
+        let hex = String(repeating: "cd", count: 20)
+        let input = "HEAD is at \(hex)"
+        XCTAssertEqual(SecretRedactor.redact(input), input)
+    }
 }

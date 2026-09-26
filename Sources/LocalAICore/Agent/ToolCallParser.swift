@@ -40,22 +40,43 @@ public enum ParsedOutput: Sendable, Equatable {
 public enum ToolCallParser {
 
     public static func parse(_ text: String) -> ParsedOutput {
+        // Strip <think>...</think> (and trailing unclosed <think>) so a model
+        // that reasons before its first <tool_call> doesn't get mis-parsed.
+        let cleaned = stripThinkBlocks(text)
         // 1. <tool_call> ... </tool_call>
-        if let range = text.range(of: "<tool_call>") {
-            let afterOpen = text[range.upperBound...]
+        if let range = cleaned.range(of: "<tool_call>") {
+            let afterOpen = cleaned[range.upperBound...]
             let bodyEnd = afterOpen.range(of: "</tool_call>")
             let body = bodyEnd.map { String(afterOpen[afterOpen.startIndex..<$0.lowerBound]) }
                 ?? String(afterOpen)
             let remaining = bodyEnd.map { String(afterOpen[$0.upperBound...]) } ?? ""
-            return interpret(body: body, remaining: remaining, fallback: text)
+            return interpret(body: body, remaining: remaining, fallback: cleaned)
         }
         // 2. ```json ... ```
-        if let fenced = extractFencedJSON(from: text) {
-            return interpret(body: fenced.body, remaining: fenced.remaining, fallback: text)
+        if let fenced = extractFencedJSON(from: cleaned) {
+            return interpret(body: fenced.body, remaining: fenced.remaining, fallback: cleaned)
         }
         // 3. No markup — treat as final answer.
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         return .finalAnswer(trimmed)
+    }
+
+    /// Remove all complete and trailing-unclosed <think>...</think> spans.
+    /// Exposed for direct callers that don't go through `parse` (e.g. tests).
+    public static func stripThinkBlocks(_ text: String) -> String {
+        var out = ""
+        var s = text
+        while let open = s.range(of: "<think>") {
+            out += s[s.startIndex..<open.lowerBound]
+            let after = s[open.upperBound...]
+            if let close = after.range(of: "</think>") {
+                s = String(after[close.upperBound...])
+            } else {
+                return out
+            }
+        }
+        out += s
+        return out
     }
 
     private static func interpret(body: String, remaining: String, fallback: String) -> ParsedOutput {

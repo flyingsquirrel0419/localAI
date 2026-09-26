@@ -33,6 +33,63 @@ final class ScriptedEngine: LocalModelEngine, @unchecked Sendable {
     }
 }
 
+/// A gate the test can keep closed to hold an engine's first generate() call.
+actor EngineGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            waiters.append(c)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for c in pending { c.resume() }
+    }
+}
+
+/// Engine whose generate() waits on an EngineGate before producing output —
+/// used to hold a run in-flight while a concurrent run is attempted.
+final class GatedEngine: LocalModelEngine, @unchecked Sendable {
+    private let scripted: ScriptedEngine
+    private let gate: EngineGate
+
+    init(outputs: [String], gate: EngineGate) {
+        self.scripted = ScriptedEngine(outputs: outputs)
+        self.gate = gate
+    }
+
+    func load(modelDirectory: URL) async throws {}
+    func unload() async {}
+    var isLoaded: Bool { true }
+
+    func generate(
+        messages: [ChatMessage],
+        parameters: GenerationParameters
+    ) -> AsyncThrowingStream<String, Error> {
+        let inner = scripted.generate(messages: messages, parameters: parameters)
+        let gate = self.gate
+        return AsyncThrowingStream { continuation in
+            Task {
+                await gate.wait()
+                do {
+                    for try await chunk in inner {
+                        continuation.yield(chunk)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+}
+
 final class AgentLoopTests: XCTestCase {
     var tempRoot: URL!
     var workspaceRoot: URL!
@@ -71,10 +128,11 @@ final class AgentLoopTests: XCTestCase {
         outputs: [String],
         limits: AgentLimits = AgentLimits(maxIterations: 10, maxToolCalls: 20, overallTimeout: 60, perToolTimeout: 10),
         taskStore: AgentTaskStore? = nil,
-        context: ToolContext? = nil
+        context: ToolContext? = nil,
+        engine: LocalModelEngine? = nil
     ) -> AgentLoop {
         AgentLoop(
-            engine: ScriptedEngine(outputs: outputs),
+            engine: engine ?? ScriptedEngine(outputs: outputs),
             executor: ToolExecutor(context: context ?? makeContext()),
             contextWindow: ContextWindowManager(tokenBudget: 8192),
             limits: limits,
@@ -218,6 +276,34 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "테스트는 하지 말고 push해줘"))
     }
 
+    func testPushWordBoundary() {
+        // M1: word-boundary match for "push" — substrings inside other tokens
+        // must not authorize.
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "fix the pushNotification handler"))
+        // Standalone "push" followed by an ASCII letter is still a push intent
+        // per the word-boundary rule (plural "notifications" starts a new word).
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "fix the apns payload, don't push"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "we already pushed this yesterday"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "i'm pushing the cart, not the repo"))
+        // Real standalone "push" still authorizes.
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "push to origin"))
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "please push"))
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "push!"))
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "커밋하고 push해줘"))
+    }
+
+    func testForcePushNeverAuthorized() {
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "force push to main"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "force-push please"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "강제로 푸시해줘"))
+    }
+
+    func testPushLaterNegation() {
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "push later, after review"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "나중에 푸시할게"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "나중에 push 할게"))
+    }
+
     func testCheckpointSaveResume() async throws {
         try fileSystem.createFile("hello.txt", contents: "checkpoint me")
         let store = AgentTaskStore(rootURL: taskStoreRoot)
@@ -323,5 +409,103 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(toolFinished.count, 1)
         XCTAssertTrue(toolFinished[0].contains("[truncated"))
         XCTAssertLessThanOrEqual(toolFinished[0].count, ToolPolicy.maxOutputChars + 200)
+    }
+
+    // H1: think blocks must not appear in assistant deltas, history, or parser input.
+    func testThinkBlocksStrippedFromAssistantOutput() async throws {
+        try fileSystem.createFile("hello.txt", contents: "world")
+        let outputs = [
+            "<think>Let me plan the read.</think><tool_call>{\"tool\":\"read_file\",\"arguments\":{\"path\":\"hello.txt\"}}</tool_call>",
+            "<think>Now I know the answer.</think>The file says: world."
+        ]
+        let loop = makeLoop(outputs: outputs)
+        let events = await collectEvents(loop.run(taskId: UUID(), userRequest: "what is in hello.txt"))
+
+        // No assistantDelta should contain "think" content.
+        let deltas = events.compactMap { event -> String? in
+            if case .assistantDelta(let d) = event { return d }
+            return nil
+        }.joined()
+        XCTAssertFalse(deltas.contains("Let me plan"), "think text leaked into assistantDelta")
+        XCTAssertFalse(deltas.contains("Now I know"), "think text leaked into assistantDelta")
+
+        // Final answer must not include think text.
+        guard case .finished(let answer) = events.last else {
+            XCTFail("expected .finished"); return
+        }
+        XCTAssertEqual(answer, "The file says: world.")
+
+        // Tool call must still be parsed correctly.
+        XCTAssertTrue(events.contains { event in
+            if case .toolStarted(_, let activity) = event {
+                return activity.title == "Reading hello.txt"
+            }
+            return false
+        })
+    }
+
+    func testUnclosedThinkDoesNotBreakFinalAnswer() async throws {
+        let outputs = ["<think>thinking forever... no closing tag"]
+        let loop = makeLoop(outputs: outputs)
+        let events = await collectEvents(loop.run(taskId: UUID(), userRequest: "any"))
+        guard case .finished(let answer) = events.last else {
+            XCTFail("expected .finished, got \(String(describing: events.last))"); return
+        }
+        XCTAssertEqual(answer, "")
+    }
+
+    // M4: a second concurrent run() must fail rather than interleave.
+    func testConcurrentRunRefused() async throws {
+        let outputs = ["answer"]
+        let loop = makeLoop(outputs: outputs)
+        // Use a suspended engine so run A stays in-flight across the B attempt.
+        let gate = EngineGate()
+        let loopA = makeLoop(outputs: outputs, engine: GatedEngine(outputs: outputs, gate: gate))
+        let streamA = await loopA.run(taskId: UUID(), userRequest: "one")
+        var iterA = streamA.makeAsyncIterator()
+        // Wait until A claims the slot AND is blocked inside generate.
+        for _ in 0..<200 {
+            let current = await loopA.state
+            if current == .running { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let runningState = await loopA.state
+        XCTAssertEqual(runningState, .running)
+
+        let streamB = await loopA.run(taskId: UUID(), userRequest: "two")
+        var sawBusyFailure = false
+        for await event in streamB {
+            if case .failed(let err) = event, err.title == "Agent is busy" {
+                sawBusyFailure = true
+            }
+        }
+        XCTAssertTrue(sawBusyFailure, "expected concurrent run() to fail with 'Agent is busy'")
+        // Release A and drain.
+        await gate.open()
+        while await iterA.next() != nil {}
+    }
+
+    // M4: stop() must not clobber an already-idle state.
+    func testStopOnIdleDoesNotMarkStopped() async throws {
+        let loop = makeLoop(outputs: [])
+        await loop.stop()
+        let state = await loop.state
+        XCTAssertEqual(state, .idle, "stop() on idle loop must not clobber state")
+    }
+
+    // C2: loop-level stop-sequence enforcement — even if the engine ignores
+    // stopSequences, the loop must cut off generation at </tool_call>.
+    func testLoopEnforcesStopSequences() async throws {
+        try fileSystem.createFile("a.txt", contents: "x")
+        // Engine emits the tool call AND extra text after </tool_call>; the
+        // loop must not pass the trailing junk to the parser as final text.
+        let outputs = [
+            #"<tool_call>{"tool":"read_file","arguments":{"path":"a.txt"}}</tool_call>EXTRA-JUNK-AFTER-STOP"#,
+            "done"
+        ]
+        let loop = makeLoop(outputs: outputs)
+        let events = await collectEvents(loop.run(taskId: UUID(), userRequest: "read a.txt"))
+        let finishes = events.filter { if case .toolFinished = $0 { return true }; return false }
+        XCTAssertEqual(finishes.count, 1, "tool call after </tool_call>+junk should still parse")
     }
 }

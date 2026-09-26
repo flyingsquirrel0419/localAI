@@ -57,6 +57,21 @@ function safeReaddir(p) {
 }
 
 /**
+ * Resolve `target` against `cwd` and ensure the result is strictly inside
+ * `cwd`. Returns the absolute path or null when the resolved target would
+ * escape. The cwd itself is considered inside (callers decide separately
+ * whether deleting cwd is allowed — for `rm` it never is).
+ */
+function resolveInside(cwd, target) {
+  if (typeof target !== 'string' || !target) return null;
+  const root = path.resolve(cwd);
+  const abs = path.resolve(cwd, target);
+  if (abs === root) return abs;
+  if (!abs.startsWith(root + path.sep)) return null;
+  return abs;
+}
+
+/**
  * Run one parsed shell segment. Returns a Promise<number> exit code.
  */
 function runSegment(seg, ctx) {
@@ -78,10 +93,16 @@ function runSegment(seg, ctx) {
     case 'rm': {
       const recursive = rest.includes('-rf') || rest.includes('-r') || rest.includes('-f');
       const targets = rest.filter((a) => !a.startsWith('-'));
+      const root = path.resolve(cwd);
       for (const t of targets) {
-        const abs = path.resolve(cwd, t);
-        if (!abs.startsWith(path.resolve(cwd) + path.sep) && abs !== path.resolve(cwd)) {
+        const abs = resolveInside(cwd, t);
+        if (!abs) {
           onStderr(`rm: refusing to remove outside cwd: ${t}\n`);
+          return Promise.resolve(1);
+        }
+        // Never allow wiping the workspace itself (`rm -rf .` / `rm -rf /cwd`).
+        if (abs === root) {
+          onStderr(`rm: refusing to remove the working directory: ${t}\n`);
           return Promise.resolve(1);
         }
         try { fs.rmSync(abs, { recursive, force: true }); } catch { /* force */ }
@@ -91,7 +112,12 @@ function runSegment(seg, ctx) {
     case 'mkdir': {
       const p = rest.includes('-p');
       for (const t of rest.filter((a) => !a.startsWith('-'))) {
-        try { fs.mkdirSync(path.resolve(cwd, t), { recursive: p }); } catch (e) {
+        const abs = resolveInside(cwd, t);
+        if (!abs) {
+          onStderr(`mkdir: refusing to create outside cwd: ${t}\n`);
+          return Promise.resolve(1);
+        }
+        try { fs.mkdirSync(abs, { recursive: p }); } catch (e) {
           onStderr(`mkdir: ${e.message}\n`);
           return Promise.resolve(1);
         }
@@ -102,10 +128,19 @@ function runSegment(seg, ctx) {
       const recursive = rest.includes('-r') || rest.includes('-R');
       const files = rest.filter((a) => !a.startsWith('-'));
       if (files.length < 2) { onStderr('cp: missing operand\n'); return Promise.resolve(1); }
-      const dest = path.resolve(cwd, files[files.length - 1]);
+      const dest = resolveInside(cwd, files[files.length - 1]);
+      if (!dest) {
+        onStderr(`cp: refusing to write outside cwd: ${files[files.length - 1]}\n`);
+        return Promise.resolve(1);
+      }
       for (const src of files.slice(0, -1)) {
+        const abs = resolveInside(cwd, src);
+        if (!abs) {
+          onStderr(`cp: refusing to read outside cwd: ${src}\n`);
+          return Promise.resolve(1);
+        }
         try {
-          fs.cpSync(path.resolve(cwd, src), dest, { recursive });
+          fs.cpSync(abs, dest, { recursive });
         } catch (e) { onStderr(`cp: ${e.message}\n`); return Promise.resolve(1); }
       }
       return Promise.resolve(0);

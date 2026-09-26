@@ -156,6 +156,12 @@ public final class AgentRunner: ObservableObject {
     /// URL and there's no current workspace repository, we clone first, then
     /// run the agent in the new workspace.
     public func send(_ text: String) async {
+        // M3: one run at a time. If a previous run is still draining (e.g. a
+        // stop() raced a send()), wait for it to fully terminate before
+        // starting the new one.
+        if let prior = runTask {
+            await prior.value
+        }
         guard !isRunning else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -211,6 +217,10 @@ public final class AgentRunner: ObservableObject {
 
     /// Resume the most recent interrupted task for the current workspace.
     public func resumeInterruptedTask() async {
+        if let prior = runTask {
+            await prior.value
+        }
+        guard !isRunning else { return }
         guard let taskID = resumableTaskID, let workspaceID else { return }
         isRunning = true
         resumableTaskID = nil
@@ -236,7 +246,9 @@ public final class AgentRunner: ObservableObject {
     public func stop() {
         runTask?.cancel()
         Task { await activeLoop?.stop() }
-        isRunning = false
+        // M3: don't reset isRunning here. The run's own `defer` clears it once
+        // the loop fully unwinds; until then, additional send() calls await
+        // the previous runTask instead of interleaving two runs.
     }
 
     /// Memory-warning / background expiration hook. The loop saves a

@@ -92,43 +92,81 @@ public actor AgentLoop {
     }
 
     /// Start a new task; emits events into the returned stream.
+    /// Refuses to start a new run while one is still active; the caller must
+    /// `await` the existing run's stream finishing (or call `stop()`) first.
     public func run(taskId: UUID, userRequest: String) -> AsyncStream<AgentEvent> {
         AsyncStream { continuation in
-            let task = Task { [weak self] in
+            Task { [weak self] in
                 guard let self else { continuation.finish(); return }
-                await self.execute(
-                    taskId: taskId,
-                    userRequest: userRequest,
-                    checkpoint: nil,
-                    continuation: continuation
-                )
+                let granted = await self.tryStartRun()
+                guard granted else {
+                    continuation.yield(.failed(UserFacingError(
+                        title: "Agent is busy",
+                        message: "Wait for the current run to finish or stop it first.",
+                        recoveryAction: .dismiss,
+                        developerDetails: "concurrent run() refused"
+                    )))
+                    continuation.finish()
+                    return
+                }
+                let task = Task { [weak self] in
+                    guard let self else { continuation.finish(); return }
+                    await self.execute(
+                        taskId: taskId,
+                        userRequest: userRequest,
+                        checkpoint: nil,
+                        continuation: continuation
+                    )
+                }
+                await self.track(task)
             }
-            Task { await self.track(task) }
         }
     }
 
     /// Resume a task from a saved checkpoint.
     public func resume(taskId: UUID) -> AsyncStream<AgentEvent> {
         AsyncStream { continuation in
-            let task = Task { [weak self] in
+            Task { [weak self] in
                 guard let self, let store = self.taskStore else {
                     continuation.finish(); return
                 }
+                let granted = await self.tryStartRun()
+                guard granted else {
+                    continuation.yield(.failed(UserFacingError(
+                        title: "Agent is busy",
+                        message: "Wait for the current run to finish or stop it first.",
+                        recoveryAction: .dismiss,
+                        developerDetails: "concurrent resume() refused"
+                    )))
+                    continuation.finish()
+                    return
+                }
                 do {
                     let checkpoint = try await store.load(taskId: taskId)
-                    await self.execute(
-                        taskId: taskId,
-                        userRequest: checkpoint.userRequest,
-                        checkpoint: checkpoint,
-                        continuation: continuation
-                    )
+                    let task = Task { [weak self] in
+                        guard let self else { continuation.finish(); return }
+                        await self.execute(
+                            taskId: taskId,
+                            userRequest: checkpoint.userRequest,
+                            checkpoint: checkpoint,
+                            continuation: continuation
+                        )
+                    }
+                    await self.track(task)
                 } catch {
                     continuation.yield(.failed(UserFacingErrorMapper.map(error)))
                     continuation.finish()
                 }
             }
-            Task { await self.track(task) }
         }
+    }
+
+    /// Atomically claim the run slot. Returns false when a run is already in
+    /// flight. The state machine lives behind the actor, so this can't race.
+    private func tryStartRun() -> Bool {
+        guard state == .idle else { return false }
+        state = .running
+        return true
     }
 
     private func track(_ task: Task<Void, Never>) {
@@ -139,7 +177,10 @@ public actor AgentLoop {
     public func stop() {
         runTask?.cancel()
         currentToolTask?.cancel()
-        state = .stopped
+        // Don't clobber a finished state; only mark stopped when actually running.
+        if state == .running {
+            state = .stopped
+        }
     }
 
     // MARK: - Run
@@ -150,8 +191,14 @@ public actor AgentLoop {
         checkpoint: AgentCheckpoint?,
         continuation: AsyncStream<AgentEvent>.Continuation
     ) async {
-        state = .running
-        defer { state = .idle; continuation.finish() }
+        // State was claimed by tryStartRun(); do not re-assign .running here.
+        defer {
+            // Don't overwrite .stopped → .idle; the next run claims via
+            // tryStartRun regardless, but keeping .stopped visible lets the
+            // UI distinguish "stopped by user" from "never ran".
+            if state == .running { state = .idle }
+            continuation.finish()
+        }
 
         let userAuthorizedPush = PushIntentDetector.userAuthorizedPush(in: userRequest)
         // Replace the executor's context push authorization for this request.
@@ -188,8 +235,10 @@ public actor AgentLoop {
         for iteration in 0..<limits.maxIterations {
             if Task.isCancelled {
                 continuation.yield(.cancelled)
-                checkpointState.state = .interrupted
-                try? await taskStore?.save(checkpointState)
+                if state != .stopped {
+                    checkpointState.state = .interrupted
+                    try? await taskStore?.save(checkpointState)
+                }
                 return
             }
             if Date() > deadline {
@@ -215,11 +264,42 @@ public actor AgentLoop {
                 stopSequences: ["</tool_call>"]
             )
             let stream = engine.generate(messages: trimmed, parameters: params)
+            // Track think-block state across deltas. We never surface <think>
+            // content in the UI, never save it to history, and never feed it
+            // to the tool parser.
+            var inThinkBlock = false
+            var thinkBuffer = ""
             do {
                 for try await delta in stream {
                     if Task.isCancelled { break }
-                    assistantText += delta
-                    continuation.yield(.assistantDelta(Self.visibleDelta(delta)))
+                    let split = Self.splitThink(delta, inThink: inThinkBlock, buffer: &thinkBuffer)
+                    inThinkBlock = split.nowInThink
+                    let visibleChunk = split.visible
+                    if visibleChunk.isEmpty { continue }
+                    assistantText += visibleChunk
+                    // Loop-level stop enforcement: the engine honors
+                    // GenerationParameters.stopSequences, but we re-check here
+                    // so a misbehaving engine still gets cut off. Truncate at
+                    // (and including) the first stop marker.
+                    if let stopHit = Self.firstStop(in: assistantText, stops: params.stopSequences) {
+                        let end = assistantText.index(assistantText.startIndex, offsetBy: stopHit.lowerBoundOffset + stopHit.length)
+                        let finalText = String(assistantText[..<end])
+                        let overflow = assistantText.count - finalText.count
+                        assistantText = finalText
+                        let visibleBeforeStop = visibleChunk.count - overflow
+                        if visibleBeforeStop > 0 {
+                            let emitted = String(visibleChunk.prefix(visibleBeforeStop))
+                            let stripped = Self.visibleDelta(emitted)
+                            if !stripped.isEmpty {
+                                continuation.yield(.assistantDelta(stripped))
+                            }
+                        }
+                        break
+                    }
+                    let stripped = Self.visibleDelta(visibleChunk)
+                    if !stripped.isEmpty {
+                        continuation.yield(.assistantDelta(stripped))
+                    }
                 }
             } catch {
                 generationFailed = UserFacingErrorMapper.map(error)
@@ -232,13 +312,21 @@ public actor AgentLoop {
             }
             if Task.isCancelled {
                 continuation.yield(.cancelled)
-                checkpointState.state = .interrupted
-                try? await taskStore?.save(checkpointState)
+                // Save .interrupted so resume works; never overwrite with a
+                // later "completed" save once the user stopped the run.
+                if state != .stopped {
+                    checkpointState.state = .interrupted
+                    try? await taskStore?.save(checkpointState)
+                }
                 return
             }
-            messages.append(ChatMessage(role: .assistant, content: assistantText))
+            // Strip think blocks from the recorded assistant message: think
+            // text isn't part of the model's tool-use contract and only
+            // pollutes the context window on subsequent turns.
+            let cleanedAssistant = Self.stripThinkBlocks(assistantText)
+            messages.append(ChatMessage(role: .assistant, content: cleanedAssistant))
 
-            switch ToolCallParser.parse(assistantText) {
+            switch ToolCallParser.parse(cleanedAssistant) {
             case .finalAnswer(let answer):
                 let changed = await executor.changedFiles
                 if !changed.isEmpty {
@@ -330,6 +418,115 @@ public actor AgentLoop {
             return String(delta[..<range.lowerBound])
         }
         return delta
+    }
+
+    /// Split a delta into "visible" text (outside <think>...</think>) versus
+    /// think-block content. Streams may split `<think>` across deltas; we keep
+    /// the unmatched tail in `buffer` until we can decide. An unclosed
+    /// `<think>` swallows the rest of the stream.
+    static func splitThink(
+        _ delta: String,
+        inThink: Bool,
+        buffer: inout String
+    ) -> (visible: String, nowInThink: Bool) {
+        buffer += delta
+        var visible = ""
+        var inT = inThink
+        var s = buffer
+        buffer = ""
+        while !s.isEmpty {
+            if inT {
+                if let close = s.range(of: "</think>") {
+                    s = String(s[close.upperBound...])
+                    inT = false
+                } else {
+                    // All inside think; drop everything (don't even buffer).
+                    return (visible, true)
+                }
+            } else {
+                if let open = s.range(of: "<think>") {
+                    visible += s[s.startIndex..<open.lowerBound]
+                    s = String(s[open.upperBound...])
+                    inT = true
+                } else {
+                    // No complete tag — but a partial "<thi..." at the end
+                    // could still be the start of "<think>". Keep up to 6
+                    // trailing chars buffered when they look like a tag prefix.
+                    let tail = Self.partialTagTail(of: s, tag: "<think>")
+                    if !tail.isEmpty, s.hasSuffix(tail) {
+                        let endIndex = s.index(s.endIndex, offsetBy: -tail.count)
+                        visible += s[s.startIndex..<endIndex]
+                        buffer = tail
+                    } else {
+                        visible += s
+                    }
+                    return (visible, false)
+                }
+            }
+        }
+        return (visible, inT)
+    }
+
+    /// The longest suffix of `text` that is also a prefix of `tag`. Empty when
+    /// no such suffix exists. Used to defer emitting text that might be the
+    /// start of a "<think>" / "</think>" tag split across deltas.
+    private static func partialTagTail(of text: String, tag: String) -> String {
+        let tagChars = Array(tag)
+        let textChars = Array(text)
+        let max = min(textChars.count, tagChars.count - 1)
+        if max <= 0 { return "" }
+        for length in stride(from: max, through: 1, by: -1) {
+            let tail = textChars[(textChars.count - length)...]
+            let prefix = tagChars[..<length]
+            if Array(tail) == Array(prefix) {
+                return String(tail)
+            }
+        }
+        return ""
+    }
+
+    /// Remove all complete and trailing-unclosed <think>...</think> spans from
+    /// `text`. Used to clean assistant text before parsing and storing.
+    static func stripThinkBlocks(_ text: String) -> String {
+        var out = ""
+        var s = text
+        while let open = s.range(of: "<think>") {
+            out += s[s.startIndex..<open.lowerBound]
+            let after = s[open.upperBound...]
+            if let close = after.range(of: "</think>") {
+                s = String(after[close.upperBound...])
+            } else {
+                // Unclosed think block swallows the remainder.
+                return out
+            }
+        }
+        out += s
+        return out
+    }
+
+    /// Find the earliest occurrence of any stop string. Returns the character
+    /// offset of the match start (from `text.startIndex`) and the matched
+    /// stop's character length so callers can include the marker in their
+    /// output. Returns character offsets (not String.Index) because indices
+    /// from `range(of:)` are not portable across String values.
+    static func firstStop(
+        in text: String,
+        stops: [String]
+    ) -> (lowerBoundOffset: Int, length: Int)? {
+        var best: (Int, Int)? = nil
+        for stop in stops where !stop.isEmpty {
+            if let range = text.range(of: stop) {
+                let offset = text.distance(from: text.startIndex, to: range.lowerBound)
+                if let current = best {
+                    if offset < current.0 {
+                        best = (offset, stop.count)
+                    }
+                } else {
+                    best = (offset, stop.count)
+                }
+            }
+        }
+        return best
     }
 
     private static func summarize(_ output: String) -> String {

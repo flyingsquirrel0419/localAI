@@ -60,6 +60,16 @@ function send(stream, obj) {
   stream.write(JSON.stringify(obj) + '\n');
 }
 
+/** Constant-time string compare. Returns false for length-mismatched inputs. */
+function tokensEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  if (!a.length) return false; // empty token is never valid
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return require('crypto').timingSafeEqual(ba, bb);
+}
+
 function makeEmitter(stream, id) {
   return {
     stdout: (data) => send(stream, { id, type: 'stdout', data }),
@@ -162,7 +172,9 @@ function onConnection(stream) {
         send(stream, { id: null, type: 'error', message: 'invalid JSON' });
         continue;
       }
-      if (TOKEN && req.token !== TOKEN) {
+      // Constant-time compare; an empty TOKEN (misconfiguration) means we
+      // refuse ALL requests rather than silently running unauthenticated.
+      if (!tokensEqual(req.token, TOKEN)) {
         send(stream, { id: req.id || null, type: 'error', message: 'unauthorized' });
         continue;
       }

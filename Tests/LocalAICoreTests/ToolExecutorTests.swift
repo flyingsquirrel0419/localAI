@@ -170,4 +170,74 @@ final class ToolExecutorTests: XCTestCase {
         XCTAssertTrue(out.contains("[REDACTED]"))
         XCTAssertFalse(out.contains("ghp_"))
     }
+
+    // M2: cancellation
+    func testCancellationReturnsCancelledFailure() async throws {
+        let exec = makeExecutor()
+        let task = Task {
+            // Simulate a run that's already been cancelled before dispatch.
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await exec.execute(ToolCall(tool: "list_directory", arguments: ["path": "."]))
+        }
+        let result = await task.value
+        guard case .failure(let message) = result else {
+            XCTFail("expected failure, got \(result)"); return
+        }
+        XCTAssertTrue(message.contains("Cancelled"))
+    }
+
+    // H4: run_node path confinement. runtime is nil here, but the path guard
+    // fires BEFORE the runtime check would matter for a hostile path.
+    func testRunNodeRejectsAbsoluteScriptPath() async throws {
+        let exec = makeExecutor()
+        // We can't actually run_node without a runtime, but the rejection
+        // must happen before the runtime is consulted. Use a fake runtime.
+        let runtime = FakeJSRuntime()
+        let context = ToolContext(
+            fileSystem: fileSystem,
+            search: RepositorySearch(fileSystem: fileSystem),
+            git: nil, runtime: runtime, credentialProvider: nil,
+            repositoryDirectory: workspaceRoot,
+            userAuthorizedPush: false, confirm: nil
+        )
+        let exec2 = ToolExecutor(context: context)
+        let result = await exec2.execute(ToolCall(tool: "run_node", arguments: ["script": "/etc/passwd"]))
+        guard case .failure(let message) = result else {
+            XCTFail("expected failure, got \(result)"); return
+        }
+        XCTAssertTrue(message.contains("inside the workspace"), "got: \(message)")
+    }
+
+    func testRunNodeRejectsTraversalScriptPath() async throws {
+        let runtime = FakeJSRuntime()
+        let context = ToolContext(
+            fileSystem: fileSystem,
+            search: RepositorySearch(fileSystem: fileSystem),
+            git: nil, runtime: runtime, credentialProvider: nil,
+            repositoryDirectory: workspaceRoot,
+            userAuthorizedPush: false, confirm: nil
+        )
+        let exec = ToolExecutor(context: context)
+        let result = await exec.execute(ToolCall(tool: "run_node", arguments: ["script": "../outside.js"]))
+        guard case .failure(let message) = result else {
+            XCTFail("expected failure, got \(result)"); return
+        }
+        XCTAssertTrue(message.contains("inside the workspace"))
+    }
+}
+
+/// Minimal JavaScriptRuntimeService used to satisfy the H4 path tests —
+/// never actually invoked because the path guard short-circuits first.
+private final class FakeJSRuntime: JavaScriptRuntimeService, @unchecked Sendable {
+    func run(
+        _ command: RuntimeCommand,
+        in directory: URL,
+        environment: [String: String],
+        timeout: TimeInterval
+    ) -> AsyncThrowingStream<RuntimeEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.exited(code: 0, duration: 0))
+            continuation.finish()
+        }
+    }
 }

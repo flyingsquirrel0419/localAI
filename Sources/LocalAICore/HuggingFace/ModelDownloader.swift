@@ -37,6 +37,9 @@ public enum DownloadError: Error, Equatable, Sendable {
     case sizeMismatch(path: String, expected: Int64, got: Int64)
     case httpStatus(path: String, status: Int)
     case missingModelsRoot
+    /// Server-supplied file path is invalid (absolute, contains `..`, or
+    /// resolves outside the model directory).
+    case invalidPath(String)
 }
 
 /// A file to download, with optional integrity metadata from the Hub API.
@@ -190,8 +193,8 @@ public actor ModelDownloader {
         var downloadedAcrossFiles: Int64 = 0
         // Account for already-partial work.
         for f in files {
-            let partial = partialURL(for: f)
-            let final = finalURL(for: f)
+            let partial = try partialURL(for: f)
+            let final = try finalURL(for: f)
             if fm.fileExists(atPath: final.path) {
                 downloadedAcrossFiles += f.size ?? (try? fileSize(final)) ?? 0
             } else if fm.fileExists(atPath: partial.path) {
@@ -240,8 +243,8 @@ public actor ModelDownloader {
         startedAt: Date
     ) async throws {
         let fm = FileManager.default
-        let final = finalURL(for: file)
-        let partial = partialURL(for: file)
+        let final = try finalURL(for: file)
+        let partial = try partialURL(for: file)
 
         // Already done? Verify integrity and skip.
         if fm.fileExists(atPath: final.path) {
@@ -373,18 +376,46 @@ public actor ModelDownloader {
         return URL(string: "https://huggingface.co/\(repo.id)/resolve/\(repo.revision)/\(encodedPath)")!
     }
 
-    private func finalURL(for file: ModelFileDownload) -> URL {
-        modelDirectory.appendingPathComponent(file.path)
+    private func finalURL(for file: ModelFileDownload) throws -> URL {
+        try resolveUnderModelDirectory(file.path)
     }
 
-    private func partialURL(for file: ModelFileDownload) -> URL {
-        modelDirectory.appendingPathComponent(file.path + ".partial")
+    private func partialURL(for file: ModelFileDownload) throws -> URL {
+        // Validate the file path itself first (so the error reports the real
+        // offender), then append the .partial suffix.
+        let validated = try resolveUnderModelDirectory(file.path)
+        return validated.appendingPathExtension("partial")
+    }
+
+    /// Resolve `relativePath` under `modelDirectory`, rejecting absolute paths,
+    /// `..` components, and anything that resolves outside the model dir.
+    /// M5: server-supplied paths from a (hypothetically hostile) Hub response
+    /// must never escape the per-model directory.
+    private func resolveUnderModelDirectory(_ relativePath: String) throws -> URL {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !relativePath.contains("\0") else {
+            throw DownloadError.invalidPath(relativePath)
+        }
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.contains("..") else {
+            throw DownloadError.invalidPath(relativePath)
+        }
+        let joined = modelDirectory.appendingPathComponent(relativePath)
+        let standardized = joined.standardizedFileURL.path
+        let root = modelDirectory.standardizedFileURL.path
+        guard standardized == root || standardized.hasPrefix(root + "/") else {
+            throw DownloadError.invalidPath(relativePath)
+        }
+        return joined
     }
 
     private func deleteAllPartials() {
         let fm = FileManager.default
         for file in files {
-            try? fm.removeItem(at: partialURL(for: file))
+            if let url = try? partialURL(for: file) {
+                try? fm.removeItem(at: url)
+            }
         }
     }
 

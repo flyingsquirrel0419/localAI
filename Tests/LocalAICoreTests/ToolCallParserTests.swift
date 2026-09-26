@@ -65,4 +65,53 @@ final class ToolCallParserTests: XCTestCase {
             XCTFail("expected parseError"); return
         }
     }
+
+    // H1: think-block stripping
+
+    func testStripsThinkBeforeToolCall() {
+        let text = """
+        <think>The user wants me to read a file. Let me plan...</think>
+        <tool_call>{"tool":"read_file","arguments":{"path":"a.txt"}}</tool_call>
+        """
+        guard case .toolCall(let call, _) = ToolCallParser.parse(text) else {
+            XCTFail("expected toolCall"); return
+        }
+        XCTAssertEqual(call.tool, "read_file")
+    }
+
+    func testStripsUnclosedThinkBlock() {
+        let text = "<think>thinking forever... never closes"
+        guard case .finalAnswer(let answer) = ToolCallParser.parse(text) else {
+            XCTFail("expected finalAnswer"); return
+        }
+        XCTAssertEqual(answer, "")
+    }
+
+    func testMultipleThinkBlocksAllStripped() {
+        let text = "<think>a</think>hello<think>b</think>world"
+        guard case .finalAnswer(let answer) = ToolCallParser.parse(text) else {
+            XCTFail("expected finalAnswer"); return
+        }
+        XCTAssertEqual(answer, "helloworld")
+    }
+
+    func testThinkContainingToolCallLikeTextIsStripped() {
+        // Model reasons about a tool call inside <think>; only the real one
+        // outside the think block should be picked up.
+        let text = """
+        <think>I could call <tool_call>{"tool":"fake","arguments":{}}</tool_call> but actually let me do:</think>
+        <tool_call>{"tool":"real_tool","arguments":{}}</tool_call>
+        """
+        guard case .toolCall(let call, _) = ToolCallParser.parse(text) else {
+            XCTFail("expected toolCall"); return
+        }
+        XCTAssertEqual(call.tool, "real_tool")
+    }
+
+    func testStripThinkBlocksHelper() {
+        XCTAssertEqual(ToolCallParser.stripThinkBlocks("<think>x</think>y"), "y")
+        XCTAssertEqual(ToolCallParser.stripThinkBlocks("plain"), "plain")
+        XCTAssertEqual(ToolCallParser.stripThinkBlocks("<think>only"), "")
+        XCTAssertEqual(ToolCallParser.stripThinkBlocks("a<think>m</think>b<think>n</think>c"), "abc")
+    }
 }

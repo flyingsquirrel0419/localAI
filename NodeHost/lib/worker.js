@@ -8,10 +8,24 @@ const { workerData } = require('worker_threads');
 const { script, args, cwd, env, execPath } = workerData;
 
 // --- env -----------------------------------------------------------------
+// H4: never propagate host credentials (LOCALAI_HOST_TOKEN etc.) into user
+// scripts. Even if the caller passed them in `env`, strip them here.
+const FORBIDDEN_ENV_KEYS = new Set([
+  'LOCALAI_HOST_TOKEN',
+  'LOCALAI_HOST_PORT',
+  'LOCALAI_HOST_PORTFILE',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'HF_TOKEN',
+  'HUGGING_FACE_HUB_TOKEN',
+]);
 for (const k of Object.keys(process.env)) {
   if (!(k in env)) delete process.env[k];
 }
-Object.assign(process.env, env);
+for (const k of Object.keys(env)) {
+  if (FORBIDDEN_ENV_KEYS.has(k)) continue;
+  process.env[k] = env[k];
+}
 
 // --- argv / argv0 / execPath ----------------------------------------------
 process.argv = [execPath, script, ...args];

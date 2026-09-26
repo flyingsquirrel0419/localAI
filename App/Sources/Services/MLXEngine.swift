@@ -15,7 +15,8 @@ import UIKit
 ///
 /// - Loads a model from a previously-downloaded local directory (the one
 ///   `ModelDownloader` produced).
-/// - Streams token deltas via `ChatSession.streamResponse`.
+/// - Streams token deltas via `ModelContainer.generate` over a `UserInput`
+///   built from the full chronological conversation.
 /// - Cancellation is delivered through Swift's `Task.cancel()` on the consumer's
 ///   `for try await` loop; we additionally keep an explicit `cancel()` that
 ///   interrupts in-flight generation on memory pressure.
@@ -139,50 +140,87 @@ public actor MLXEngine: LocalModelEngine {
         params.topP = Float(parameters.topP)
         params.maxTokens = parameters.maxTokens
 
-        // Translate our messages into MLX chat messages. The first system
-        // message (if any) becomes the session instructions; the LAST user
-        // message is what we stream against; everything before it becomes the
-        // session's prior history.
-        var instructions: String? = nil
-        var prior: [Chat.Message] = []
-        var latestUser: Chat.Message? = nil
+        // Build the full conversation as a single [Chat.Message] in the order
+        // received. `UserInput(chat:)` applies the model's chat template to the
+        // entire list, preserving chronological order (the prior implementation
+        // reshuffled the original task into history and streamed against only
+        // the last user message, derailing the agent loop after iteration 1).
+        //
+        // Role mapping: our `tool` role becomes MLX's `.tool` so chat templates
+        // that support tool results render them in the right slot. Templates
+        // without tool support degrade gracefully (the message text is still
+        // included).
+        var chatMessages: [Chat.Message] = []
+        chatMessages.reserveCapacity(messages.count)
         for message in messages {
             switch message.role {
             case .system:
-                if instructions == nil {
-                    instructions = message.content
-                } else {
-                    prior.append(Chat.Message(role: .system, content: message.content))
-                }
+                chatMessages.append(Chat.Message(role: .system, content: message.content))
             case .user:
-                if let previous = latestUser {
-                    prior.append(previous)
-                }
-                latestUser = Chat.Message(role: .user, content: message.content)
+                chatMessages.append(Chat.Message(role: .user, content: message.content))
             case .assistant:
-                prior.append(Chat.Message(role: .assistant, content: message.content))
+                chatMessages.append(Chat.Message(role: .assistant, content: message.content))
             case .tool:
-                prior.append(Chat.Message(role: .user, content: message.content))
+                chatMessages.append(Chat.Message(role: .tool, content: message.content))
             }
         }
-        guard let latest = latestUser else {
+        guard !chatMessages.isEmpty else {
             continuation.finish(throwing: ModelEngineError.notLoaded)
             return
         }
 
-        // Build a fresh ChatSession for this turn, rehydrating prior history.
-        let session = ChatSession(
-            container,
-            instructions: instructions,
-            history: prior,
-            generateParameters: params
-        )
+        // Stop sequences: per-request stops aren't a `GenerateParameters` knob
+        // (they live on ModelConfiguration). Enforce them here: accumulate text,
+        // halt when any stop string appears, and truncate at (but include) the
+        // stop marker so the parser downstream sees a complete <tool_call>.
+        let stopSequences = parameters.stopSequences.filter { !$0.isEmpty }
 
         do {
-            let stream = session.streamResponse(to: latest.content)
-            for try await chunk in stream {
+            let input = try await container.prepare(input: UserInput(chat: chatMessages))
+            let stream = try await container.generate(input: input, parameters: params)
+            var accumulated = ""
+            var hitStop = false
+            var pendingTail = ""
+            for await generation in stream {
                 try Task.checkCancellation()
-                continuation.yield(chunk)
+                if hitStop { break }
+                guard case .chunk(let text) = generation else { continue }
+                if stopSequences.isEmpty {
+                    continuation.yield(text)
+                    continue
+                }
+                // Append to a small buffer; only emit the prefix that cannot
+                // contain the start of a stop string. This avoids leaking the
+                // first half of "</tool_call>" if the chunk boundary splits it.
+                pendingTail += text
+                if let emit = Self.drainablePrefix(of: &pendingTail, stops: stopSequences) {
+                    accumulated += emit
+                    if let stopHit = Self.firstStop(in: accumulated, stops: stopSequences) {
+                        // finalText is accumulated truncated just past the stop marker.
+                        let finalCount = stopHit.lowerBoundOffset + stopHit.length
+                        let alreadyStreamed = accumulated.count - pendingTail.count
+                        if finalCount > alreadyStreamed {
+                            let emitTail = String(accumulated.dropFirst(alreadyStreamed).prefix(finalCount - alreadyStreamed))
+                            continuation.yield(emitTail)
+                        }
+                        hitStop = true
+                        break
+                    }
+                    continuation.yield(emit)
+                }
+            }
+            if !hitStop, !stopSequences.isEmpty, !pendingTail.isEmpty {
+                accumulated += pendingTail
+                if let stopHit = Self.firstStop(in: accumulated, stops: stopSequences) {
+                    let finalCount = stopHit.lowerBoundOffset + stopHit.length
+                    let alreadyStreamed = accumulated.count - pendingTail.count
+                    if finalCount > alreadyStreamed {
+                        let emitTail = String(accumulated.dropFirst(alreadyStreamed).prefix(finalCount - alreadyStreamed))
+                        continuation.yield(emitTail)
+                    }
+                } else {
+                    continuation.yield(pendingTail)
+                }
             }
             continuation.finish()
         } catch is CancellationError {
@@ -190,6 +228,46 @@ public actor MLXEngine: LocalModelEngine {
         } catch {
             continuation.finish(throwing: error)
         }
+    }
+
+    /// Pop the longest prefix of `buffer` that definitely does not contain the
+    /// start of any stop string. Returns nil if the buffer is too small to
+    /// decide (caller should wait for more text).
+    private static func drainablePrefix(of buffer: inout String, stops: [String]) -> String? {
+        // The largest stop prefix that could match at the tail determines how
+        // much is safe to release. We conservatively keep the last
+        // (maxStopLength - 1) characters buffered.
+        let maxStop = stops.map(\.count).max() ?? 0
+        guard buffer.count >= maxStop else { return nil }
+        let keep = maxStop - 1
+        let emitCount = buffer.count - keep
+        let emit = String(buffer.prefix(emitCount))
+        buffer = String(buffer.suffix(keep))
+        return emit
+    }
+
+    /// Find the earliest occurrence of any stop string. Returns the character
+    /// offset of the match start (from `text.startIndex`) and the matched
+    /// stop's character length. Offsets (not String.Index) are returned
+    /// because indices from `range(of:)` are not portable across String values.
+    private static func firstStop(
+        in text: String,
+        stops: [String]
+    ) -> (lowerBoundOffset: Int, length: Int)? {
+        var best: (Int, Int)? = nil
+        for stop in stops {
+            if let range = text.range(of: stop) {
+                let offset = text.distance(from: text.startIndex, to: range.lowerBound)
+                if let current = best {
+                    if offset < current.0 {
+                        best = (offset, stop.count)
+                    }
+                } else {
+                    best = (offset, stop.count)
+                }
+            }
+        }
+        return best
     }
 
     // MARK: - Memory warnings

@@ -158,7 +158,14 @@ final class RawRepo {
     // MARK: - Revert single path from HEAD
 
     /// `git checkout HEAD -- <path>` — restore working-tree contents from HEAD.
+    /// Rejects paths containing `..` or starting with `/` to keep the
+    /// operation inside the working tree.
     func checkoutPathFromHead(_ path: String) throws {
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.split(separator: "/").contains("..") else {
+            throw Error(message: "invalid path: \(path)")
+        }
         var opts = git_checkout_options()
         git_checkout_options_init(&opts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
         opts.checkout_strategy = GIT_CHECKOUT_FORCE.rawValue

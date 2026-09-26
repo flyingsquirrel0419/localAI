@@ -96,15 +96,17 @@ function readTgz(gzbuf) {
 /**
  * Extract a .tgz Buffer into a directory, stripping the given number of
  * leading path components (npm tarballs use "package/..." — strip 1).
- * Path traversal attempts ("../") are skipped. Symlinks whose target escapes
- * destDir are skipped; safe symlinks are written as small files containing the
- * target path text is NOT done — instead we attempt a real symlink and on
- * failure copy nothing (bin links are handled separately by the installer).
+ * Path traversal attempts ("../") are skipped. Symlinks are only created
+ * when their resolved target stays inside destDir; absolute targets and
+ * targets that escape (e.g. `../../../../etc/passwd`) are skipped entirely.
+ * The same guard is applied to hardlinks, which are currently ignored by the
+ * parser but reserved here.
  */
 function extractTgz(gzbuf, destDir, { strip = 1, fs, path } = {}) {
   fs = fs || require('fs');
   path = path || require('path');
   const entries = readTgz(gzbuf);
+  const root = path.resolve(destDir);
   let files = 0;
   for (const e of entries) {
     const parts = e.name.split('/').filter((p) => p && p !== '.');
@@ -119,10 +121,16 @@ function extractTgz(gzbuf, destDir, { strip = 1, fs, path } = {}) {
       fs.writeFileSync(dest, e.data, { mode: e.mode || 0o644 });
       files++;
     } else if (e.type === 'symlink') {
+      // Resolve the symlink target relative to the directory containing the
+      // link, then verify it stays inside the extraction root.
+      const linkname = e.linkname || '';
+      if (!linkname || path.isAbsolute(linkname)) continue;
+      const resolved = path.resolve(path.dirname(dest), linkname);
+      if (resolved !== root && !resolved.startsWith(root + path.sep)) continue;
       // Attempt real symlink; tolerate failure (e.g. Windows-ish filesystems).
       try {
         fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.symlinkSync(e.linkname, dest);
+        fs.symlinkSync(linkname, dest);
       } catch { /* best effort */ }
     }
   }
