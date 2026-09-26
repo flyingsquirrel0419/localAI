@@ -160,10 +160,23 @@ jobs:
             || { echo "::error::Frameworks/NodeMobile.framework missing from LocalAI.app"; exit 1; }
           test -f "$APP_PATH/NodeHost/host.js" \
             || { echo "::error::NodeHost/host.js missing from LocalAI.app"; exit 1; }
-          otool -L "$APP_PATH/LocalAI" | tee otool.log
-          grep -q "NodeMobile" otool.log \
-            || { echo "::error::LocalAI binary does not link NodeMobile — canImport(NodeMobile) was false at build time"; exit 1; }
-          echo "Node runtime present: NodeMobile.framework embedded, NodeHost bundled, binary links NodeMobile."
+          # Debug builds put the app code in LocalAI.debug.dylib; the thin
+          # launcher binary links almost nothing. Check both for the
+          # NodeMobile reference.
+          BINARIES="$APP_PATH/LocalAI"
+          [ -f "$APP_PATH/LocalAI.debug.dylib" ] && BINARIES="$BINARIES $APP_PATH/LocalAI.debug.dylib"
+          otool -L $BINARIES | tee otool.log
+          if grep -q "NodeMobile" otool.log; then
+            echo "Binary links NodeMobile dynamically."
+          elif nm -gU $BINARIES 2>/dev/null | grep -q "_node_start"; then
+            # Static framework: no dynamic reference, but the symbol is
+            # linked into the binary — still proves canImport(NodeMobile).
+            echo "node_start symbol linked into binary (static NodeMobile)."
+          else
+            echo "::error::LocalAI binary neither links NodeMobile nor contains node_start — canImport(NodeMobile) was false at build time"
+            exit 1
+          fi
+          echo "Node runtime present: NodeMobile.framework embedded, NodeHost bundled, binary references NodeMobile."
 
       # JavaScriptRuntime/NodeHostRuntime/AgentAcceptance tests spawn node/npm.
       # /usr/bin is SIP read-only on macOS, so core resolves node from PATH
