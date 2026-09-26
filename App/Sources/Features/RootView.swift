@@ -9,7 +9,7 @@ struct RootView: View {
         TabView {
             AgentTabView()
                 .tabItem { Label("Agent", systemImage: "sparkles") }
-            CodeBrowserTabView(store: environment.workspaceStore)
+            CodeBrowserTabView(environment: environment)
                 .tabItem { Label("Code", systemImage: "chevron.left.forwardslash.chevron.right") }
             ModelsView(service: environment.modelService)
                 .tabItem { Label("Models", systemImage: "cube") }
@@ -52,6 +52,29 @@ final class WorkspaceSelection: ObservableObject {
         }
     }
 
+    /// Create a workspace and clone `url` into its repository directory.
+    /// `onProgress` receives 0...1 progress during the fetch phase.
+    func createByCloning(
+        name: String,
+        url: URL,
+        gitService: Libgit2GitService,
+        credentialProvider: GitCredentialProvider
+    ) async throws {
+        let meta = try await store.create(name: name, repositoryURL: url)
+        let directory = try await store.repositoryURL(for: meta.id)
+        let credentials = try await credentialProvider.credentials(for: url)
+        do {
+            try await gitService.clone(url: url, to: directory, branch: nil, credentials: credentials)
+        } catch {
+            // Roll back the workspace so a failed clone doesn't leave a stub.
+            try? await store.delete(id: meta.id, confirm: true)
+            throw error
+        }
+        await refresh()
+        current = meta
+        isPickerPresented = false
+    }
+
     func open(_ meta: WorkspaceMetadata) async {
         do {
             current = try await store.open(id: meta.id)
@@ -74,8 +97,13 @@ final class WorkspaceSelection: ObservableObject {
 }
 
 struct WorkspacePickerSheet: View {
+    @EnvironmentObject private var environment: AppEnvironment
     @ObservedObject var selection: WorkspaceSelection
     @State private var newName: String = ""
+    @State private var cloneURL: String = ""
+    @State private var cloneName: String = ""
+    @State private var isCloning = false
+    @State private var cloneError: String?
 
     var body: some View {
         NavigationStack {
@@ -90,6 +118,30 @@ struct WorkspacePickerSheet: View {
                             Task { await selection.create(name: name) }
                         }
                         .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                Section("Clone repository") {
+                    TextField("https://github.com/owner/repo", text: $cloneURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Workspace name (optional)", text: $cloneName)
+                    if isCloning {
+                        HStack {
+                            ProgressView()
+                            Text("Cloning…")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Button("Clone") {
+                            startClone()
+                        }
+                        .disabled(parsedCloneURL == nil)
+                    }
+                    if let cloneError {
+                        Text(cloneError)
+                            .font(DesignSystem.Typography.caption)
+                            .foregroundStyle(DesignSystem.Colors.destructive)
                     }
                 }
                 Section("Existing") {
@@ -129,6 +181,57 @@ struct WorkspacePickerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { selection.isPickerPresented = false }
+                }
+            }
+        }
+    }
+
+    /// Accept https://github.com/owner/repo (with or without trailing `/`, `.git`).
+    private var parsedCloneURL: URL? {
+        let trimmed = cloneURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              let host = url.host?.lowercased(),
+              host == "github.com" || host == "www.github.com",
+              url.path.split(separator: "/").count >= 2 else {
+            return nil
+        }
+        return url
+    }
+
+    private func startClone() {
+        guard let url = parsedCloneURL else { return }
+        // Default workspace name = "owner-repo" unless user overrode it.
+        let defaultName: String = {
+            let parts = url.path.split(separator: "/").map(String.init)
+            guard parts.count >= 2 else { return url.lastPathComponent }
+            let repo = parts[1].hasSuffix(".git") ? String(parts[1].dropLast(4)) : parts[1]
+            return "\(parts[0])-\(repo)"
+        }()
+        let name = cloneName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? defaultName
+            : cloneName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        isCloning = true
+        cloneError = nil
+        Task {
+            do {
+                try await selection.createByCloning(
+                    name: name,
+                    url: url,
+                    gitService: environment.gitService,
+                    credentialProvider: environment.gitCredentialProvider
+                )
+                await MainActor.run {
+                    isCloning = false
+                    cloneURL = ""
+                    cloneName = ""
+                }
+            } catch {
+                await MainActor.run {
+                    isCloning = false
+                    let uf = UserFacingErrorMapper.map(error)
+                    cloneError = "\(uf.title): \(uf.message)"
                 }
             }
         }

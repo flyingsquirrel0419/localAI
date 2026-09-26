@@ -18,6 +18,12 @@ packages:
   swift-transformers:
     url: https://github.com/huggingface/swift-transformers
     from: 1.3.0
+  # libgit2 Swift wrapper. Pinned to `main` because the only tag (v0.1.0)
+  # does not yet ship the Git2 Swift target — only the C-exporting shim.
+  # TODO: switch to `from: 0.2.0` (or the next tag) once one is published.
+  libgit2.swift:
+    url: https://github.com/k-ymmt/libgit2.swift.git
+    branch: main
 
 targets:
   LocalAI:
@@ -44,6 +50,8 @@ targets:
         product: HuggingFace
       - package: swift-transformers
         product: Tokenizers
+      - package: libgit2.swift
+        product: Git2
     info:
       path: Generated/Info.plist
       generating: true

@@ -18,9 +18,19 @@ struct CodeBrowserTabView: View {
         var id: String { rawValue }
     }
 
-    init(store: WorkspaceStore) {
+    init(environment: AppEnvironment) {
+        let store = environment.workspaceStore
         _selection = StateObject(wrappedValue: WorkspaceSelection(store: store))
-        _service = StateObject(wrappedValue: CodeService(workspaceStore: store))
+        let gitStatus = Libgit2GitStatusProvider(service: environment.gitService)
+        let service = CodeService(
+            workspaceStore: store,
+            gitService: environment.gitService,
+            gitStatusProvider: gitStatus
+        )
+        service.gitCredentialProviderForPush = {
+            try await environment.gitCredentialProvider.credentials(for: nil)
+        }
+        _service = StateObject(wrappedValue: service)
     }
 
     var body: some View {

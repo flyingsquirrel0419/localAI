@@ -57,6 +57,17 @@ public struct GitHubAuthService: Sendable {
         return ValidatedUser(login: login, name: json["name"] as? String)
     }
 
+    /// Best-effort commit-author identity for a token: GET /user, then
+    /// `name` (falling back to `login`) + the canonical noreply address.
+    /// Returns nil when the token is missing or invalid.
+    public func commitAuthor(token: String) async -> GitAuthor? {
+        guard let user = try? await validatePAT(token) else { return nil }
+        let displayName = (user.name?.isEmpty == false ? user.name! : user.login)
+        // GitHub's per-user noreply address — safe to embed in commit headers.
+        let email = "\(user.login)@users.noreply.github.com"
+        return GitAuthor(name: displayName, email: email)
+    }
+
     // MARK: - Device flow
 
     public struct DeviceCode: Sendable, Equatable {

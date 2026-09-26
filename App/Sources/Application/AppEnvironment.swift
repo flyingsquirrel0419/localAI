@@ -15,6 +15,8 @@ final class AppEnvironment: ObservableObject {
     let workspaceStore: WorkspaceStore
     let credentialStore: CredentialStore
     let modelService: ModelService
+    let gitService: Libgit2GitService
+    let gitCredentialProvider: GitCredentialProvider
 
     private static let onboardingKey = "com.localai.workspace.hasCompletedOnboarding"
 
@@ -44,6 +46,11 @@ final class AppEnvironment: ObservableObject {
             modelStore: store,
             modelsRoot: modelsRoot,
             credentialStore: self.credentialStore
+        )
+
+        self.gitService = Libgit2GitService()
+        self.gitCredentialProvider = CredentialStoreGitCredentialProvider(
+            store: self.credentialStore, key: .githubToken
         )
 
         self.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingKey)
