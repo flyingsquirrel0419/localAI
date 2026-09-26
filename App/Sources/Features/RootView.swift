@@ -1,20 +1,61 @@
 import SwiftUI
 import LocalAICore
 
-/// App root after onboarding: Agent | Code | Models.
+/// App root after onboarding: Agent (default) | Code | Models.
 struct RootView: View {
     @EnvironmentObject private var environment: AppEnvironment
+    /// Selected tab. Agent is the default; persisted across relaunch so the
+    /// user lands where they were. Default value forces Agent on first run.
+    @AppStorage("com.localai.workspace.selectedTab") private var selectedTab: Tab = .agent
+
+    enum Tab: Hashable {
+        case agent, code, models
+    }
 
     var body: some View {
-        TabView {
-            AgentTabView()
+        RootContentView(
+            environment: environment,
+            selectedTab: $selectedTab
+        )
+    }
+}
+
+/// Inner view that owns the WorkspaceSelection StateObject. Splitting it out
+/// lets us construct StateObject with a non-optional store from the
+/// environment (RootView's own init can't read @EnvironmentObject).
+private struct RootContentView: View {
+    let environment: AppEnvironment
+    @Binding var selectedTab: RootView.Tab
+    @StateObject private var selection: WorkspaceSelection
+
+    init(environment: AppEnvironment, selectedTab: Binding<RootView.Tab>) {
+        self.environment = environment
+        _selectedTab = selectedTab
+        _selection = StateObject(wrappedValue: WorkspaceSelection(store: environment.workspaceStore))
+    }
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            AgentTabView(selection: selection)
                 .tabItem { Label("Agent", systemImage: "sparkles") }
-            CodeBrowserTabView(environment: environment)
+                .tag(RootView.Tab.agent)
+            CodeBrowserTabView(environment: environment, selection: selection)
                 .tabItem { Label("Code", systemImage: "chevron.left.forwardslash.chevron.right") }
+                .tag(RootView.Tab.code)
             ModelsView(service: environment.modelService)
                 .tabItem { Label("Models", systemImage: "cube") }
+                .tag(RootView.Tab.models)
         }
         .tint(DesignSystem.Colors.accent)
+        .task {
+            await selection.refresh()
+        }
+        .onChange(of: environment.agentRunner.showDiffRequest) { _, requested in
+            if requested {
+                selectedTab = .code
+                environment.agentRunner.showDiffRequest = false
+            }
+        }
     }
 }
 
@@ -266,30 +307,15 @@ struct WorkspaceHeader: View {
 
 struct AgentTabView: View {
     @EnvironmentObject private var environment: AppEnvironment
-
-    var body: some View {
-        AgentTabContent(store: environment.workspaceStore, modelService: environment.modelService)
-    }
-}
-
-private struct AgentTabContent: View {
-    let store: WorkspaceStore
-    let modelService: ModelService
-    @StateObject private var selection: WorkspaceSelection
-
-    init(store: WorkspaceStore, modelService: ModelService) {
-        self.store = store
-        self.modelService = modelService
-        _selection = StateObject(wrappedValue: WorkspaceSelection(store: store))
-    }
+    @ObservedObject var selection: WorkspaceSelection
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                WorkspaceHeader(selection: selection)
-                    .padding(.top, DesignSystem.Spacing.sm)
-                AgentChatView(modelService: modelService)
-            }
+            AgentChatView(
+                modelService: environment.modelService,
+                runner: environment.agentRunner,
+                selection: selection
+            )
             .background(DesignSystem.Colors.background)
             .navigationTitle("Agent")
             .navigationBarTitleDisplayMode(.inline)
@@ -299,7 +325,6 @@ private struct AgentTabContent: View {
             .alert(item: $selection.error) { uf in
                 Alert(title: Text(uf.title), message: Text(uf.message), dismissButton: .default(Text("OK")))
             }
-            .task { await selection.refresh() }
         }
     }
 }

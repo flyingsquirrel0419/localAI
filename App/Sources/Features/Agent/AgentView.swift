@@ -1,53 +1,122 @@
 import SwiftUI
 import LocalAICore
 
-/// Agent tab: minimal chat that streams from the active MLX model.
-/// Tool use and the agent loop arrive in a later phase — this is an honest
-/// chat against the loaded model.
+/// Agent tab — the main screen. Streams from `AgentRunner` (which wraps the
+/// core `AgentLoop` + `ToolExecutor`), shows the workspace header, handles
+/// confirmation dialogs, and surfaces the resume banner.
 struct AgentChatView: View {
     @EnvironmentObject private var environment: AppEnvironment
     @ObservedObject var modelService: ModelService
+    @ObservedObject var runner: AgentRunner
+    @ObservedObject var selection: WorkspaceSelection
 
-    @State private var messages: [ChatMessage] = []
     @State private var input: String = ""
-    @State private var isGenerating = false
-    @State private var currentTask: Task<Void, Never>?
-    @State private var error: UserFacingError?
+    @State private var errorForAlert: UserFacingError?
 
     var body: some View {
         VStack(spacing: 0) {
+            AgentHeaderView(
+                selection: selection,
+                modelService: modelService,
+                runner: runner
+            )
+
+            if let resumable = runner.resumableTaskID {
+                ResumeBanner(
+                    onResume: { Task { await runner.resumeInterruptedTask() } },
+                    onDismiss: { Task { await dismissResumable(resumable) } }
+                )
+            }
+
+            if runner.rows.isEmpty {
+                emptyState
+            } else {
+                timeline
+            }
+
+            if runner.changedFilesCount > 0 {
+                ChangedFilesBar(
+                    fileCount: runner.changedFilesCount,
+                    added: runner.changedFilesAdded,
+                    removed: runner.changedFilesRemoved,
+                    onViewChanges: { runner.requestShowDiff() }
+                )
+            }
+
+            inputBar
+        }
+        .background(DesignSystem.Colors.background)
+        .alert(item: $errorForAlert) { uf in
+            Alert(
+                title: Text(uf.title),
+                message: Text(uf.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+        .alert("Confirm action", isPresented: Binding(
+            get: { runner.pendingConfirmation != nil },
+            set: { if !$0 { runner.resolveConfirmation(false) } }
+        )) {
+            Button("Allow") { runner.resolveConfirmation(true) }
+            Button("Deny", role: .cancel) { runner.resolveConfirmation(false) }
+        } message: {
+            Text(runner.pendingConfirmation ?? "")
+        }
+        .onChange(of: runner.error) { _, newValue in
+            if let err = newValue {
+                errorForAlert = err
+                runner.error = nil
+            }
+        }
+        .onChange(of: selection.current?.id) { _, newID in
+            runner.attach(workspaceID: newID)
+        }
+        .task {
+            runner.attach(workspaceID: selection.current?.id)
+        }
+    }
+
+    // MARK: - Subviews
+
+    private var emptyState: some View {
+        VStack(spacing: DesignSystem.Spacing.md) {
+            Spacer()
             if modelService.activeModelID == nil {
-                Spacer()
                 ContentUnavailableView(
                     "No active model",
                     systemImage: "cube",
                     description: Text("Open the Models tab, download a model, then tap \"Use model\" to start chatting.")
                 )
-                Spacer()
+            } else if selection.current == nil {
+                ContentUnavailableView(
+                    "No workspace",
+                    systemImage: "folder",
+                    description: Text("Pick a workspace above, or paste a GitHub URL below and ask the agent to clone it.")
+                )
             } else {
-                chatList
-                inputBar
+                ContentUnavailableView(
+                    "Ask the agent",
+                    systemImage: "sparkles",
+                    description: Text("e.g. \"Fix the failing test in src/sum.js\" or \"clone https://github.com/owner/repo and run the tests\"")
+                )
             }
-        }
-        .background(DesignSystem.Colors.background)
-        .alert(item: $error) { uf in
-            Alert(title: Text(uf.title), message: Text(uf.message), dismissButton: .default(Text("OK")))
+            Spacer()
         }
     }
 
-    private var chatList: some View {
+    private var timeline: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: DesignSystem.Spacing.sm) {
-                    ForEach(messages) { message in
-                        MessageBubble(message: message)
-                            .id(message.id)
+                LazyVStack(alignment: .leading, spacing: DesignSystem.Spacing.xs) {
+                    ForEach(runner.rows) { row in
+                        TimelineRowView(row: row)
+                            .id(row.id)
                     }
                 }
                 .padding(DesignSystem.Spacing.md)
             }
-            .onChange(of: messages.count) { _, _ in
-                if let last = messages.last {
+            .onChange(of: runner.rows.count) { _, _ in
+                if let last = runner.rows.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
@@ -56,27 +125,31 @@ struct AgentChatView: View {
 
     private var inputBar: some View {
         HStack(spacing: DesignSystem.Spacing.sm) {
-            TextField("Message", text: $input, axis: .vertical)
+            TextField("Ask the agent", text: $input, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...5)
-            if isGenerating {
+                .disabled(runner.isRunning)
+            if runner.isRunning {
                 Button {
-                    currentTask?.cancel()
-                    isGenerating = false
+                    runner.stop()
                 } label: {
                     Image(systemName: "stop.circle.fill")
                         .font(.title2)
                 }
                 .tint(DesignSystem.Colors.destructive)
+                .accessibilityLabel("Stop")
             } else {
                 Button {
-                    send()
+                    let text = input
+                    input = ""
+                    Task { await runner.send(text) }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
                 }
                 .tint(DesignSystem.Colors.accent)
                 .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel("Send")
             }
         }
         .padding(.horizontal, DesignSystem.Spacing.md)
@@ -84,71 +157,186 @@ struct AgentChatView: View {
         .background(DesignSystem.Colors.cardBackground)
     }
 
-    private func send() {
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        input = ""
+    private func dismissResumable(_ taskID: UUID) async {
+        // Best-effort: delete the checkpoint so it stops surfacing.
+        try? await environment.agentTaskStore.delete(taskId: taskID)
+        await runner.refreshResumable()
+    }
+}
 
-        let userMessage = ChatMessage(role: .user, content: text)
-        messages.append(userMessage)
-        let assistantID = UUID()
-        messages.append(ChatMessage(id: assistantID, role: .assistant, content: ""))
+// MARK: - Header
 
-        isGenerating = true
-        let engine = modelService.engine
-        // History passed to the engine excludes the empty placeholder we just added.
-        let history = messages.filter { $0.id != assistantID }
-        currentTask = Task {
-            let stream = await engine.generate(messages: history, parameters: .default)
-            var received = ""
-            do {
-                for try await chunk in stream {
-                    received += chunk
-                    await MainActor.run {
-                        if let index = messages.firstIndex(where: { $0.id == assistantID }) {
-                            messages[index].content = received
-                        }
+private struct AgentHeaderView: View {
+    @ObservedObject var selection: WorkspaceSelection
+    @ObservedObject var modelService: ModelService
+    @ObservedObject var runner: AgentRunner
+
+    var body: some View {
+        VStack(spacing: DesignSystem.Spacing.xs) {
+            WorkspaceHeader(selection: selection)
+            HStack(spacing: DesignSystem.Spacing.sm) {
+                Text(modelService.activeModelID ?? "no model")
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Circle()
+                    .fill(runner.isRunning ? Color.green : Color.gray.opacity(0.5))
+                    .frame(width: 8, height: 8)
+                Spacer()
+                if runner.canPushToGitHub {
+                    Button {
+                        Task { await runner.pushToGitHub() }
+                    } label: {
+                        Label("Push to GitHub", systemImage: "arrow.up.to.line")
+                            .font(DesignSystem.Typography.caption)
                     }
-                }
-            } catch {
-                await MainActor.run {
-                    self.error = UserFacingErrorMapper.map(error)
+                    .buttonStyle(.borderedProminent)
+                    .tint(DesignSystem.Colors.accent)
                 }
             }
-            await MainActor.run { isGenerating = false }
+            .padding(.horizontal, DesignSystem.Spacing.md)
         }
     }
 }
 
-private struct MessageBubble: View {
-    let message: ChatMessage
+// MARK: - Timeline rows
+
+private struct TimelineRowView: View {
+    let row: AgentTimelineRow
 
     var body: some View {
-        HStack {
-            if message.role == .user { Spacer(minLength: 32) }
-            Text(message.content.isEmpty && message.role == .assistant ? "…" : message.content)
+        switch row {
+        case .user(_, let text):
+            HStack {
+                Spacer(minLength: 32)
+                Text(text)
+                    .font(DesignSystem.Typography.body)
+                    .padding(DesignSystem.Spacing.sm)
+                    .background(DesignSystem.Colors.accent)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.card))
+                    .textSelection(.enabled)
+            }
+        case .assistant(_, let text):
+            // Streamed assistant text — no giant bubble, just body text.
+            Text(text.isEmpty ? "…" : text)
                 .font(DesignSystem.Typography.body)
-                .padding(DesignSystem.Spacing.sm)
-                .background(backgroundColor)
-                .foregroundStyle(foregroundColor)
-                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.card))
+                .foregroundStyle(.primary)
                 .textSelection(.enabled)
-            if message.role != .user { Spacer(minLength: 32) }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .tool(let run):
+            ToolRowView(run: run)
         }
     }
+}
 
-    private var backgroundColor: Color {
-        switch message.role {
-        case .user: return DesignSystem.Colors.accent
-        case .assistant: return DesignSystem.Colors.cardBackground
-        case .system, .tool: return Color.orange.opacity(0.15)
+private struct ToolRowView: View {
+    let run: AgentToolRun
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.xs) {
+            Button {
+                if !run.rawOutput.isEmpty { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: DesignSystem.Spacing.sm) {
+                    statusIcon
+                    Text(run.title)
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if !run.rawOutput.isEmpty {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(DesignSystem.Colors.secondaryText)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded, !run.rawOutput.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(run.rawOutput)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(DesignSystem.Colors.secondaryText)
+                        .textSelection(.enabled)
+                        .padding(DesignSystem.Spacing.sm)
+                }
+                .background(DesignSystem.Colors.cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.card))
+            }
         }
+        .padding(.vertical, 2)
     }
 
-    private var foregroundColor: Color {
-        switch message.role {
-        case .user: return .white
-        default: return .primary
+    private var statusIcon: some View {
+        Group {
+            switch run.status {
+            case .running:
+                ProgressView().controlSize(.mini)
+            case .succeeded:
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .failed:
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
         }
+        .frame(width: 14, height: 14)
+    }
+}
+
+// MARK: - Resume banner
+
+private struct ResumeBanner: View {
+    let onResume: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: DesignSystem.Spacing.sm) {
+            Image(systemName: "arrow.clockwise")
+            Text("Resume interrupted task?")
+                .font(DesignSystem.Typography.caption)
+            Spacer()
+            Button("Resume", action: onResume)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            Button(role: .cancel, action: onDismiss) {
+                Image(systemName: "xmark")
+            }
+            .controlSize(.small)
+        }
+        .padding(DesignSystem.Spacing.sm)
+        .background(DesignSystem.Colors.cardBackground)
+        .padding(.horizontal, DesignSystem.Spacing.md)
+    }
+}
+
+// MARK: - Changed files bar
+
+private struct ChangedFilesBar: View {
+    let fileCount: Int
+    let added: Int
+    let removed: Int
+    let onViewChanges: () -> Void
+
+    var body: some View {
+        HStack(spacing: DesignSystem.Spacing.sm) {
+            Text("Changed \(fileCount) file\(fileCount == 1 ? "" : "s")")
+                .font(DesignSystem.Typography.caption)
+            if added > 0 {
+                Text("+\(added)").foregroundStyle(.green).font(DesignSystem.Typography.caption)
+            }
+            if removed > 0 {
+                Text("-\(removed)").foregroundStyle(.red).font(DesignSystem.Typography.caption)
+            }
+            Spacer()
+            Button("View Changes", action: onViewChanges)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, DesignSystem.Spacing.md)
+        .padding(.vertical, DesignSystem.Spacing.sm)
+        .background(DesignSystem.Colors.cardBackground)
     }
 }

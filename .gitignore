@@ -9,3 +9,5 @@ xcuserdata/
 .env.*
 !.env.example
 App/Generated/
+# Binary xcframework downloaded by CI; never commit.
+App/Frameworks/

@@ -18,12 +18,14 @@ packages:
   swift-transformers:
     url: https://github.com/huggingface/swift-transformers
     from: 1.3.0
-  # libgit2 Swift wrapper. Pinned to `main` because the only tag (v0.1.0)
-  # does not yet ship the Git2 Swift target — only the C-exporting shim.
+  # libgit2 Swift wrapper. Pinned to a specific revision on `main` because the
+  # only tag (v0.1.0) does not yet ship the Git2 Swift target — only the
+  # C-exporting shim. Pinning (instead of `branch: main`) keeps CI builds
+  # reproducible; bump deliberately after reviewing upstream changes.
   # TODO: switch to `from: 0.2.0` (or the next tag) once one is published.
   libgit2.swift:
     url: https://github.com/k-ymmt/libgit2.swift.git
-    branch: main
+    revision: ab180685d63507faf626df21d5eb72d675e564b3
 
 targets:
   LocalAI:
@@ -32,6 +34,13 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Sources
+      # NodeHost JS bundle — folder reference so the entire tree (host.js,
+      # lib/, npm/) is copied verbatim into the app bundle. Path is relative
+      # to this project.yml (App/).
+      - path: ../NodeHost
+        name: NodeHost
+        type: folder
+        buildPhase: resources
     entitlements:
       path: LocalAI.entitlements
       properties:
@@ -52,6 +61,12 @@ targets:
         product: Tokenizers
       - package: libgit2.swift
         product: Git2
+      # NodeMobile: vendored xcframework downloaded by CI (see
+      # .github/workflows/ci.yml "Download NodeMobile"). Linked + embedded so
+      # `import NodeMobile` exposes node_start(int, char**).
+      - framework: Frameworks/NodeMobile.xcframework
+        embed: true
+        codeSign: false
     info:
       path: Generated/Info.plist
       generating: true
@@ -68,6 +83,12 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+        # Background task identifiers registered with BGTaskScheduler.
+        # Used by BackgroundTaskCoordinator (iOS 26+) for user-initiated
+        # agent runs and model downloads.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.localai.agent.run
+          - com.localai.model.download
         # OAuth client IDs. Empty by default; when empty, the corresponding
         # OAuth button is hidden at runtime. Set these in a local override
         # (or via Xcode build settings) when OAuth apps are registered.

@@ -12,15 +12,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # JavaScriptRuntimeTests (merged from main) spawn real node/npm processes;
-      # the bare swift:6.1 container doesn't ship Node.js.
+      # the bare swift:6.1 container doesn't ship Node.js. Use setup-node with
+      # Node 18 to match what nodejs-mobile ships on iOS (v18.20.4).
       - name: Install Node.js
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq nodejs npm
-      - name: Build
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Build LocalAICore
         run: swift build -j 2
-      - name: Test
+      - name: Test LocalAICore
         run: swift test -j 2
+      - name: NodeHost unit tests
+        run: node --test NodeHost/test/*.test.js
 
   ios:
     runs-on: macos-15
@@ -60,6 +63,54 @@ jobs:
           key: ${{ runner.os }}-spm-${{ hashFiles('App/project.yml', 'Package.swift') }}
           restore-keys: |
             ${{ runner.os }}-spm-
+
+      # NodeMobile.xcframework is a binary release artefact (~51 MB zip,
+      # ~180 MB unzipped). Cache it by release tag so we only download when
+      # the version changes.
+      - name: Cache NodeMobile
+        id: cache-nodemobile
+        uses: actions/cache@v4
+        with:
+          path: App/Frameworks/NodeMobile.xcframework
+          key: nodemobile-v18.20.4
+
+      - name: Download NodeMobile
+        if: steps.cache-nodemobile.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p App/Frameworks
+          curl -sSfL -o /tmp/nodejs-mobile-ios.zip \
+            https://github.com/nodejs-mobile/nodejs-mobile/releases/download/v18.20.4/nodejs-mobile-v18.20.4-ios.zip
+          unzip -q /tmp/nodejs-mobile-ios.zip 'NodeMobile.xcframework/*' -d App/Frameworks
+          rm /tmp/nodejs-mobile-ios.zip
+          # Sanity check: the framework's public header must declare node_start.
+          grep -q "int node_start" \
+            App/Frameworks/NodeMobile.xcframework/ios-arm64/NodeMobile.framework/Headers/NodeMobile.h
+
+      # Verify the BackgroundTasks APIs we plan to use actually exist in the
+      # SDK the runner ships. This guards against Apple renaming the symbol
+      # between betas. If this fails, the BGContinuedProcessingTask block in
+      # App/Sources/Application/BackgroundTaskCoordinator.swift must be
+      # re-gated or removed.
+      - name: Verify iOS 26 BackgroundTasks API
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          HEADER="$SDK_PATH/System/Library/Frameworks/BackgroundTasks.framework/Headers/BGContinuedProcessingTask.h"
+          if xcodebuild -version | grep -q "Xcode 26"; then
+            if [ ! -f "$HEADER" ]; then
+              echo "::error::BGContinuedProcessingTask.h not found under $SDK_PATH"
+              echo "::error::Available BackgroundTasks headers:"
+              ls "$SDK_PATH/System/Library/Frameworks/BackgroundTasks.framework/Headers/" || true
+              exit 1
+            fi
+            grep -q "BGContinuedProcessingTaskRequest" "$HEADER" || {
+              echo "::error::BGContinuedProcessingTaskRequest missing from $HEADER"
+              exit 1
+            }
+            echo "BGContinuedProcessingTask is available in the iOS 26 SDK."
+          else
+            echo "Xcode < 26 selected; BGContinuedProcessingTask path will be compiled out."
+          fi
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -103,3 +154,6 @@ jobs:
 
       - name: Run LocalAICore tests on macOS
         run: swift test -j 2
+
+      - name: NodeHost unit tests
+        run: node --test NodeHost/test/*.test.js

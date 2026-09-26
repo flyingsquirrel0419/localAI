@@ -6,7 +6,7 @@ import LocalAICore
 /// (iPad / landscape), pushed as a sheet on iPhone portrait.
 struct CodeBrowserTabView: View {
     @EnvironmentObject private var environment: AppEnvironment
-    @StateObject private var selection: WorkspaceSelection
+    @ObservedObject var selection: WorkspaceSelection
     @StateObject private var service: CodeService
 
     @State private var selectedFile: String?
@@ -18,9 +18,9 @@ struct CodeBrowserTabView: View {
         var id: String { rawValue }
     }
 
-    init(environment: AppEnvironment) {
+    init(environment: AppEnvironment, selection: WorkspaceSelection) {
+        _selection = ObservedObject(wrappedValue: selection)
         let store = environment.workspaceStore
-        _selection = StateObject(wrappedValue: WorkspaceSelection(store: store))
         let gitStatus = Libgit2GitStatusProvider(service: environment.gitService)
         let service = CodeService(
             workspaceStore: store,
@@ -74,6 +74,9 @@ struct CodeBrowserTabView: View {
             }
             .onChange(of: selection.current?.id) { _, _ in
                 Task { await attachToCurrent() }
+            }
+            .onChange(of: environment.agentRunner.showDiffRequest) { _, requested in
+                if requested { mode = .diff }
             }
         }
     }

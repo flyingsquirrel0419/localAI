@@ -17,6 +17,10 @@ final class AppEnvironment: ObservableObject {
     let modelService: ModelService
     let gitService: Libgit2GitService
     let gitCredentialProvider: GitCredentialProvider
+    let agentTaskStore: AgentTaskStore
+    let nodeLauncher: NodeMobileLauncher
+    let runtimeCoordinator: NodeRuntimeCoordinator
+    let agentRunner: AgentRunner
 
     private static let onboardingKey = "com.localai.workspace.hasCompletedOnboarding"
 
@@ -51,6 +55,24 @@ final class AppEnvironment: ObservableObject {
         self.gitService = Libgit2GitService()
         self.gitCredentialProvider = CredentialStoreGitCredentialProvider(
             store: self.credentialStore, key: .githubToken
+        )
+
+        // Agent checkpoints under <root>/AgentTasks/.
+        self.agentTaskStore = AgentTaskStore(rootURL: root)
+
+        // Node runtime: single in-process NodeMobile instance per app process.
+        let nodeLauncher = NodeMobileLauncher()
+        self.nodeLauncher = nodeLauncher
+        let runtimeCoordinator = NodeRuntimeCoordinator(launcher: nodeLauncher)
+        self.runtimeCoordinator = runtimeCoordinator
+
+        self.agentRunner = AgentRunner(
+            engine: engine,
+            workspaceStore: self.workspaceStore,
+            gitService: self.gitService,
+            credentialProvider: self.gitCredentialProvider,
+            taskStore: self.agentTaskStore,
+            runtimeCoordinator: runtimeCoordinator
         )
 
         self.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingKey)
