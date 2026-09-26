@@ -390,7 +390,7 @@ public final class ProcessNodeHostLauncher: NodeHostLauncher, @unchecked Sendabl
     private var process: Process?
     private let lock = NSLock()
 
-    public init(hostScript: URL, nodePath: String = "/usr/bin/node") {
+    public init(hostScript: URL, nodePath: String = NodePathResolver.resolve("node")) {
         self.hostScript = hostScript
         self.nodePath = nodePath
     }
