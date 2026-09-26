@@ -4,18 +4,25 @@ import LocalAICore
 /// App root after onboarding: Agent (default) | Code | Models.
 struct RootView: View {
     @EnvironmentObject private var environment: AppEnvironment
-    /// Selected tab. Agent is the default; persisted across relaunch so the
-    /// user lands where they were. Default value forces Agent on first run.
-    @AppStorage("com.localai.workspace.selectedTab") private var selectedTab: Tab = .agent
+    /// Selected tab as a raw string (AppStorage needs RawRepresentable).
+    /// Defaults to "agent" so a fresh install lands on the Agent tab.
+    @AppStorage("com.localai.workspace.selectedTab") private var selectedTabRaw: String = Tab.agent.rawValue
 
-    enum Tab: Hashable {
+    enum Tab: String, Hashable {
         case agent, code, models
+    }
+
+    private var selectedTab: Binding<Tab> {
+        Binding(
+            get: { Tab(rawValue: selectedTabRaw) ?? .agent },
+            set: { selectedTabRaw = $0.rawValue }
+        )
     }
 
     var body: some View {
         RootContentView(
             environment: environment,
-            selectedTab: $selectedTab
+            selectedTab: selectedTab
         )
     }
 }
