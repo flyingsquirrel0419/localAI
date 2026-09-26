@@ -74,6 +74,7 @@ jobs:
       # device destination — compile-only, no signing.
       - name: Build iOS app
         run: |
+          set -o pipefail
           xcodebuild \
             -project App/LocalAI.xcodeproj \
             -scheme LocalAI \
@@ -83,7 +84,14 @@ jobs:
             -skipMacroValidation \
             build \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_REQUIRED=NO \
+            | tee build.log \
+            | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+          # Surface the real failure lines; grep alone swallows exit codes.
+          if ! grep -q "BUILD SUCCEEDED" build.log; then
+            grep -E "error:" build.log | sort -u || true
+            exit 1
+          fi
 
       - name: Run LocalAICore tests on macOS
         run: swift test -j 2

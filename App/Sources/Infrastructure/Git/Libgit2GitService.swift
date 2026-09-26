@@ -47,7 +47,7 @@ public actor Libgit2GitService: GitService {
 
     // MARK: - Errors
 
-    private func mapError(_ error: Git2.GitError, hint: String? = nil) -> LocalAICore.GitError {
+    private static func mapError(_ error: Git2.GitError, hint: String? = nil) -> LocalAICore.GitError {
         switch error.code {
         case .auth:           return .authenticationFailed
         case .nonFastForward: return .nonFastForward
@@ -91,18 +91,40 @@ public actor Libgit2GitService: GitService {
         var fetchOpts = Repository.FetchOptions()
         fetchOpts.credentials = credentialsHandler(for: credentials)
 
-        do {
-            if let branch {
-                let spec = Refspec("+refs/heads/\(branch):refs/remotes/origin/\(branch)")
-                try repo.fetch(remoteNamed: "origin", refspecs: [spec], options: fetchOpts)
-            } else {
-                try repo.fetch(remoteNamed: "origin", options: fetchOpts)
-            }
-        } catch let error as Git2.GitError {
-            throw mapError(error, hint: remoteURLString)
+        // Note: typed-throws `do { if/else } catch` trips a SILGen ownership
+        // verifier crash in the Swift 6.2 toolchain (Xcode 26.3 CI image) for
+        // `GitError`. Fetch is therefore factored into a helper whose do-block
+        // contains a single call, and the mapped error is thrown from a local.
+        if let branch {
+            let spec = Refspec("+refs/heads/\(branch):refs/remotes/origin/\(branch)")
+            try Self.fetchForClone(repo: repo, refspec: spec, options: fetchOpts, hint: remoteURLString)
+        } else {
+            try Self.fetchForClone(repo: repo, refspec: nil, options: fetchOpts, hint: remoteURLString)
         }
 
         let branchName = branch ?? (try? Self.discoverDefaultBranch(repo: repo)) ?? "main"
+        try Self.checkoutClonedBranch(repo: repo, branchName: branchName)
+    }
+
+    private static func fetchForClone(
+        repo: Repository,
+        refspec: Refspec?,
+        options: Repository.FetchOptions,
+        hint: String
+    ) throws {
+        do {
+            if let refspec {
+                try repo.fetch(remoteNamed: "origin", refspecs: [refspec], options: options)
+            } else {
+                try repo.fetch(remoteNamed: "origin", options: options)
+            }
+        } catch let error as Git2.GitError {
+            let mapped = mapError(error, hint: hint)
+            throw mapped
+        }
+    }
+
+    private static func checkoutClonedBranch(repo: Repository, branchName: String) throws {
         do {
             guard let tracking = try repo.reference(named: "refs/remotes/origin/\(branchName)") else {
                 throw LocalAICore.GitError.branchNotFound(branchName)
@@ -111,7 +133,8 @@ public actor Libgit2GitService: GitService {
             _ = try repo.createBranch(named: branchName, at: tip, force: true)
             try repo.checkout(branchNamed: branchName)
         } catch let error as Git2.GitError {
-            throw mapError(error)
+            let mapped = mapError(error)
+            throw mapped
         }
     }
 
