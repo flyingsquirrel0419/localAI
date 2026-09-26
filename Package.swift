@@ -18,7 +18,8 @@ let package = Package(
         .testTarget(
             name: "LocalAICoreTests",
             dependencies: ["LocalAICore"],
-            path: "Tests/LocalAICoreTests"
+            path: "Tests/LocalAICoreTests",
+            resources: [.copy("Fixtures")]
         )
     ]
 )
