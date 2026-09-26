@@ -180,7 +180,7 @@ public actor Libgit2GitService: GitService {
             }
             return out
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -191,7 +191,7 @@ public actor Libgit2GitService: GitService {
             defer { raw.close() }
             return try raw.unifiedDiff(paths: paths, staged: staged)
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         } catch let error as RawRepo.Error {
             throw LocalAICore.GitError.commandFailed(error.message)
         }
@@ -212,7 +212,7 @@ public actor Libgit2GitService: GitService {
             }
             try index.save()
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -224,7 +224,7 @@ public actor Libgit2GitService: GitService {
             defer { raw.close() }
             for path in paths { try raw.unstagePath(path) }
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         } catch let error as RawRepo.Error {
             throw LocalAICore.GitError.commandFailed(error.message)
         }
@@ -253,7 +253,7 @@ public actor Libgit2GitService: GitService {
             try index.save()
             return newCommit.oid.hex
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -286,7 +286,7 @@ public actor Libgit2GitService: GitService {
         } catch let error as Git2.GitError {
             if error.code == .nonFastForward { throw LocalAICore.GitError.nonFastForward }
             if error.code == .conflict { throw LocalAICore.GitError.conflict([]) }
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -320,7 +320,7 @@ public actor Libgit2GitService: GitService {
             try repo.push(remoteNamed: remote, refspecs: [spec], options: opts)
         } catch let error as Git2.GitError {
             if error.code == .nonFastForward { throw LocalAICore.GitError.nonFastForward }
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -342,7 +342,7 @@ public actor Libgit2GitService: GitService {
             }
             return out
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -361,7 +361,7 @@ public actor Libgit2GitService: GitService {
                 }
                 return "main"
             }
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -383,7 +383,7 @@ public actor Libgit2GitService: GitService {
                 }
             }
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         }
     }
 
@@ -421,7 +421,7 @@ public actor Libgit2GitService: GitService {
             defer { raw.close() }
             try raw.checkoutPathFromHead(path)
         } catch let error as Git2.GitError {
-            throw mapError(error, hint: directory.path)
+            throw Self.mapError(error, hint: directory.path)
         } catch let error as RawRepo.Error {
             throw LocalAICore.GitError.commandFailed(error.message)
         }

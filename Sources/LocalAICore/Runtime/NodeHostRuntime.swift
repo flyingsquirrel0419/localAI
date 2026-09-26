@@ -304,7 +304,7 @@ final class LineSocket: @unchecked Sendable {
             var written = 0
             while written < bytes.count {
                 #if canImport(Glibc)
-                let flags = MSG_NOSIGNAL
+                let flags = Int32(MSG_NOSIGNAL)
                 #else
                 let flags: Int32 = 0 // SO_NOSIGPIPE set at open() time on Darwin
                 #endif
