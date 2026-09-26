@@ -117,7 +117,7 @@ public actor Libgit2GitService: GitService {
 
     private static func discoverDefaultBranch(repo: Repository) throws -> String {
         // Prefer the remote's HEAD symref when present.
-        if let head = try? repo.reference(named: "refs/remotes/origin/HEAD"), let head {
+        if let head = try? repo.reference(named: "refs/remotes/origin/HEAD") {
             let target = head.name
             if let last = target.split(separator: "/").last { return String(last) }
         }

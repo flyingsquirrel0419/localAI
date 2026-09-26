@@ -161,7 +161,7 @@ final class RawRepo {
     func checkoutPathFromHead(_ path: String) throws {
         var opts = git_checkout_options()
         git_checkout_options_init(&opts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
-        opts.checkout_strategy = UInt32(GIT_CHECKOUT_FORCE.rawValue)
+        opts.checkout_strategy = GIT_CHECKOUT_FORCE.rawValue
 
         let cStr = strdup(path)
         defer { free(cStr) }
