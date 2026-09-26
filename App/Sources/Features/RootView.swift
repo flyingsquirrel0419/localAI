@@ -9,9 +9,9 @@ struct RootView: View {
         TabView {
             AgentTabView()
                 .tabItem { Label("Agent", systemImage: "sparkles") }
-            CodeTabView()
+            CodeBrowserTabView(store: environment.workspaceStore)
                 .tabItem { Label("Code", systemImage: "chevron.left.forwardslash.chevron.right") }
-            ModelsTabView()
+            ModelsView(service: environment.modelService)
                 .tabItem { Label("Models", systemImage: "cube") }
         }
         .tint(DesignSystem.Colors.accent)
@@ -165,43 +165,31 @@ struct AgentTabView: View {
     @EnvironmentObject private var environment: AppEnvironment
 
     var body: some View {
-        AgentTabContent(store: environment.workspaceStore)
+        AgentTabContent(store: environment.workspaceStore, modelService: environment.modelService)
     }
 }
 
-/// Wrapper that owns the real selection once environment is available.
 private struct AgentTabContent: View {
     let store: WorkspaceStore
+    let modelService: ModelService
     @StateObject private var selection: WorkspaceSelection
 
-    init(store: WorkspaceStore) {
+    init(store: WorkspaceStore, modelService: ModelService) {
         self.store = store
+        self.modelService = modelService
         _selection = StateObject(wrappedValue: WorkspaceSelection(store: store))
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: DesignSystem.Spacing.md) {
+            VStack(spacing: 0) {
                 WorkspaceHeader(selection: selection)
-                Spacer()
-                if selection.current == nil {
-                    ContentUnavailableView(
-                        "No workspace",
-                        systemImage: "folder.badge.questionmark",
-                        description: Text("Create or select a workspace to start an agent session.")
-                    )
-                } else {
-                    ContentUnavailableView(
-                        "Agent arrives in Phase 3",
-                        systemImage: "sparkles",
-                        description: Text("The agent loop will live here once the model engine is wired.")
-                    )
-                }
-                Spacer()
+                    .padding(.top, DesignSystem.Spacing.sm)
+                AgentChatView(modelService: modelService)
             }
-            .padding(.top, DesignSystem.Spacing.md)
             .background(DesignSystem.Colors.background)
             .navigationTitle("Agent")
+            .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $selection.isPickerPresented) {
                 WorkspacePickerSheet(selection: selection)
             }
@@ -209,71 +197,6 @@ private struct AgentTabContent: View {
                 Alert(title: Text(uf.title), message: Text(uf.message), dismissButton: .default(Text("OK")))
             }
             .task { await selection.refresh() }
-        }
-    }
-}
-
-struct CodeTabView: View {
-    @EnvironmentObject private var environment: AppEnvironment
-
-    var body: some View {
-        CodeTabContent(store: environment.workspaceStore)
-    }
-}
-
-private struct CodeTabContent: View {
-    let store: WorkspaceStore
-    @StateObject private var selection: WorkspaceSelection
-
-    init(store: WorkspaceStore) {
-        self.store = store
-        _selection = StateObject(wrappedValue: WorkspaceSelection(store: store))
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: DesignSystem.Spacing.md) {
-                WorkspaceHeader(selection: selection)
-                Spacer()
-                if selection.current == nil {
-                    ContentUnavailableView(
-                        "No workspace",
-                        systemImage: "folder.badge.questionmark",
-                        description: Text("Create or select a workspace to browse files.")
-                    )
-                } else {
-                    ContentUnavailableView(
-                        "Code browser arrives in Phase 2",
-                        systemImage: "doc.text.magnifyingglass",
-                        description: Text("File tree, editor, and diffs will appear here.")
-                    )
-                }
-                Spacer()
-            }
-            .padding(.top, DesignSystem.Spacing.md)
-            .background(DesignSystem.Colors.background)
-            .navigationTitle("Code")
-            .sheet(isPresented: $selection.isPickerPresented) {
-                WorkspacePickerSheet(selection: selection)
-            }
-            .alert(item: $selection.error) { uf in
-                Alert(title: Text(uf.title), message: Text(uf.message), dismissButton: .default(Text("OK")))
-            }
-            .task { await selection.refresh() }
-        }
-    }
-}
-
-struct ModelsTabView: View {
-    var body: some View {
-        NavigationStack {
-            ContentUnavailableView(
-                "Model management arrives in Phase 2",
-                systemImage: "cube",
-                description: Text("Search Hugging Face, download, and load local models here.")
-            )
-            .navigationTitle("Models")
-            .background(DesignSystem.Colors.background)
         }
     }
 }

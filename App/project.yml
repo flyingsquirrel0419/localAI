@@ -7,6 +7,12 @@ options:
 packages:
   LocalAICore:
     path: ..
+  mlx-swift-lm:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    from: 3.31.4
+  swift-huggingface:
+    url: https://github.com/huggingface/swift-huggingface
+    from: 0.11.0
 
 targets:
   LocalAI:
@@ -15,9 +21,22 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Sources
+    entitlements:
+      path: LocalAI.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+        com.apple.developer.kernel.extended-virtual-addressing: true
     dependencies:
       - package: LocalAICore
         product: LocalAICore
+      - package: mlx-swift-lm
+        product: MLXLLM
+      - package: mlx-swift-lm
+        product: MLXLMCommon
+      - package: mlx-swift-lm
+        product: MLXHuggingFace
+      - package: swift-huggingface
+        product: HuggingFace
     info:
       path: Generated/Info.plist
       generating: true
@@ -34,3 +53,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+        # OAuth client IDs. Empty by default; when empty, the corresponding
+        # OAuth button is hidden at runtime. Set these in a local override
+        # (or via Xcode build settings) when OAuth apps are registered.
+        GitHubOAuthClientID: ""
+        HuggingFaceOAuthClientID: ""

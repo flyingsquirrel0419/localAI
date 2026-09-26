@@ -14,6 +14,7 @@ final class AppEnvironment: ObservableObject {
 
     let workspaceStore: WorkspaceStore
     let credentialStore: CredentialStore
+    let modelService: ModelService
 
     private static let onboardingKey = "com.localai.workspace.hasCompletedOnboarding"
 
@@ -32,6 +33,19 @@ final class AppEnvironment: ObservableObject {
         self.credentialStore = InMemoryCredentialStore()
         #endif
 
+        // Models live under <root>/Models/.
+        let modelsRoot = root.appendingPathComponent("Models", isDirectory: true)
+        try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
+
+        let engine = MLXEngine()
+        let store = ModelStore(modelsRoot: modelsRoot)
+        self.modelService = ModelService(
+            engine: engine,
+            modelStore: store,
+            modelsRoot: modelsRoot,
+            credentialStore: self.credentialStore
+        )
+
         self.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: Self.onboardingKey)
     }
 
@@ -44,6 +58,7 @@ final class AppEnvironment: ObservableObject {
         for key in CredentialKey.allCases {
             try? credentialStore.delete(key)
         }
+        await modelService.unloadActiveModel()
         hasCompletedOnboarding = false
     }
 
