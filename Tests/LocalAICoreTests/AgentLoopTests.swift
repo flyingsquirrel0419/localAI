@@ -196,6 +196,28 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "read the file"))
     }
 
+    func testPushNegationsDoNotAuthorize() {
+        // English negations.
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "commit but don't push"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "do not push this"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "commit without pushing"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "never push to origin"))
+        // Korean negations.
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "push하지 마"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "푸시하지 말고 커밋만"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "푸시 없이 커밋해줘"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "올리지 마"))
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "GitHub에 올리지 말고"))
+        // Mixed-case Latin inside Korean must still match.
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "GitHub에 올려"))
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "GITHUB에 올려줘"))
+        XCTAssertTrue(PushIntentDetector.userAuthorizedPush(in: "github에 올려"))
+        // Conservative: any "하지 말고"/"없이" anywhere vetoes, even when the
+        // negation targets something else — better to refuse a real push than
+        // to push without consent.
+        XCTAssertFalse(PushIntentDetector.userAuthorizedPush(in: "테스트는 하지 말고 push해줘"))
+    }
+
     func testCheckpointSaveResume() async throws {
         try fileSystem.createFile("hello.txt", contents: "checkpoint me")
         let store = AgentTaskStore(rootURL: taskStoreRoot)

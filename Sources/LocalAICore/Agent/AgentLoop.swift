@@ -33,16 +33,18 @@ public struct AgentLimits: Sendable, Equatable {
 }
 
 /// Builds the system prompt for small (~4B) models: short, imperative, with
-/// the exact tool-call format spelled out.
+/// the exact tool-call format spelled out and one worked example. Kept under
+/// ~1500 tokens (≈6000 chars) so it fits small context windows.
 public enum AgentSystemPrompt {
     public static func build(projectInfo: String? = nil) -> String {
         var lines: [String] = [
             "You are a coding agent working inside a git repository.",
-            "Call ONE tool per turn using this exact format:",
+            "Call ONE tool per turn, exactly:",
             "<tool_call>{\"tool\":\"NAME\",\"arguments\":{...}}</tool_call>",
-            "When the task is fully done, answer in plain text with no tool call.",
-            "Never invent tool names or arguments. If a tool fails, read the error and adjust.",
-            "Available tools:"
+            "Example: <tool_call>{\"tool\":\"read_file\",\"arguments\":{\"path\":\"src/sum.js\"}}</tool_call>",
+            "When the task is done, reply in plain text with NO tool call.",
+            "Never invent tools or arguments. On failure, read the error and adjust.",
+            "Tools:"
         ]
         for tool in AgentTools.all {
             lines.append(tool.promptDescription())
