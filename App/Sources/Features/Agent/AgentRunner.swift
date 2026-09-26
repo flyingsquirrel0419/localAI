@@ -308,7 +308,9 @@ public final class AgentRunner: ObservableObject {
             }
         )
         let executor = ToolExecutor(context: context)
-        let contextWindow = ContextWindowManager()
+        // 8K tokens is the budget used by AgentLoopTests/AgentAcceptanceTests;
+        // matches what fits comfortably in small (~4B) on-device models.
+        let contextWindow = ContextWindowManager(tokenBudget: 8192)
         let loop = AgentLoop(
             engine: engine,
             executor: executor,
